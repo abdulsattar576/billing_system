@@ -9,12 +9,24 @@ export const initDB = async () => {
 
   const localDB = new PouchDB("crud-database");
 
-  const savedIp = localStorage.getItem("server_url");
-  const remoteDB = savedIp
-    ? new PouchDB(`http://admin:512141@${savedIp}:5984/db_fcn`)
+  const savedUrl = localStorage.getItem("server_url");
+const savedDB = localStorage.getItem("server_db");
+const savedUser = localStorage.getItem("server_user");
+const savedPass = localStorage.getItem("server_pass");
+
+const remoteDbUrl =
+  savedUrl && savedDB
+    ? `${savedUrl.replace(
+        "http://",
+        `http://${savedUser}:${savedPass}@`
+      )}/${savedDB}`
     : null;
 
+console.log("Remote DB URL:", remoteDbUrl);
 
+const remoteDB = remoteDbUrl
+  ? new PouchDB(remoteDbUrl)
+  : null;
   // ---------------------------
   // LIVE TWO-WAY SYNC
   // ---------------------------

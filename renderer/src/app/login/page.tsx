@@ -126,9 +126,7 @@ export default function LoginPage() {
 
       window.location.reload();
     } catch (err) {
-      if (err instanceof Error) {
-        alert(err);
-      }
+       
       alert("Cannot connect to server. Please check the IP.");
     }
   };

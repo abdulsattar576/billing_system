@@ -29,7 +29,7 @@ const menuItems = [
   { name: "Add Area", icon: faLocationDot, href: "/areas" },
   { name: "Add Connection", icon: faUserPlus, href: "/persons" },
   
-  { name: "Delete Connection", icon: faUserMinus, href: "/remove" },
+  
   // { name: "Update Record", icon: faPenToSquare, href: "/update-record" },
   { name: "Find Record", icon: faSearch, href: "/searchperson" },
  
@@ -40,7 +40,7 @@ const menuItems = [
   { name: "Credit Note", icon: faCreditCard, href: "/credit-note" },
   { name: "Person Records", icon: faHistory, href: "/person-records" },
   { name: "Disconnection List", icon: faBan, href: "/disconnection-list" },
-  { name: "Defaulter Lists", icon: faExclamationTriangle, href: "/defaulter-lists" },
+  // { name: "Defaulter Lists", icon: faExclamationTriangle, href: "/defaulter-lists" },
   { name: "Internet Entry", icon: faGlobe, href: "/Internet-entery-page" },
    { name: "Internet Report", icon: faGlobe, href: "/InternetReport" },
    { name: "Login", icon: faRightToBracket, href: "/login" },
