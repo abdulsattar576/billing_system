@@ -20,6 +20,7 @@ import {
   faCreditCard,
   faSun,
   faMoon,
+  faFileInvoiceDollar
 } from "@fortawesome/free-solid-svg-icons";
 import Link from 'next/link';
 import { useDarkMode } from './DarkModeContext';
@@ -38,6 +39,9 @@ const menuItems = [
   { name: "Report Menu", icon: faFileLines, href: "/ReportMenu" },
   { name: "Cash Received", icon: faReceipt, href: "/debitNote" },
   { name: "Credit Note", icon: faCreditCard, href: "/credit-note" },
+  {
+    name:"Debit Note",icon:faFileInvoiceDollar,href:"/debitadd"},
+  
   { name: "Person Records", icon: faHistory, href: "/person-records" },
   { name: "Disconnection List", icon: faBan, href: "/disconnection-list" },
   // { name: "Defaulter Lists", icon: faExclamationTriangle, href: "/defaulter-lists" },
