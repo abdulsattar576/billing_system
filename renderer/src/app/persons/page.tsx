@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { initDB } from "../services/db";
 
 export default function PersonsPage() {
@@ -9,12 +9,12 @@ export default function PersonsPage() {
   const [selectedArea, setSelectedArea] = useState("");
   const [persons, setPersons] = useState<any[]>([]);
   const [searchTerm, setSearchTerm] = useState("");
-
+  const [feeList, setFeeList] = useState<any[]>([]);
   const [personName, setPersonName] = useState("");
   const [personConnectionNumber, setPersonConnectionNumber] = useState("");
   const [personAddress, setPersonAddress] = useState("");
   const [personReceiptNo, setPersonReceiptNo] = useState("");
-  const [monthlyFee, setMonthlyFee] = useState<number | ''>('');
+  const [monthlyFee, setMonthlyFee] = useState<number | "">("");
   const [phoneNumber, setPhoneNumber] = useState("");
   const [loading, setLoading] = useState(true);
   const receiptRef = useRef<HTMLDivElement>(null);
@@ -35,6 +35,8 @@ export default function PersonsPage() {
       if (pouch) {
         pouch.syncDB();
         setDb(pouch);
+        const fees = await pouch.getFeeList();
+        setFeeList(fees);
         const allAreas = await pouch.getAreas();
         setAreas(allAreas);
         setLoading(false);
@@ -118,10 +120,10 @@ export default function PersonsPage() {
         personConnectionNumber.trim(),
         Number(monthlyFee),
         personAddress.trim(),
-        0,               // amountPaid defaults to 0
+        0, // amountPaid defaults to 0
         Number(monthlyFee), // remainingBalance = full monthly fee
         personReceiptNo.trim(),
-        phoneNumber.trim()
+        phoneNumber.trim(),
       );
 
       const allPersons = await db.getPersonsByArea(areaId);
@@ -175,12 +177,30 @@ export default function PersonsPage() {
   const updateExistingPerson = async () => {
     if (!db || !editingPerson) return;
 
-    if (!selectedArea) { alert("Please select an area for the person"); return; }
-    if (!personName.trim()) { alert("Please enter person name"); return; }
-    if (!personConnectionNumber.trim()) { alert("Please enter a connection number"); return; }
-    if (!personReceiptNo.trim()) { alert("Please enter a receipt number"); return; }
-    if (!personAddress.trim()) { alert("Please enter person address"); return; }
-    if (monthlyFee === "" || Number.isNaN(Number(monthlyFee))) { alert("Please enter monthly fee"); return; }
+    if (!selectedArea) {
+      alert("Please select an area for the person");
+      return;
+    }
+    if (!personName.trim()) {
+      alert("Please enter person name");
+      return;
+    }
+    if (!personConnectionNumber.trim()) {
+      alert("Please enter a connection number");
+      return;
+    }
+    if (!personReceiptNo.trim()) {
+      alert("Please enter a receipt number");
+      return;
+    }
+    if (!personAddress.trim()) {
+      alert("Please enter person address");
+      return;
+    }
+    if (monthlyFee === "" || Number.isNaN(Number(monthlyFee))) {
+      alert("Please enter monthly fee");
+      return;
+    }
 
     const newMonthlyFee = Number(monthlyFee);
 
@@ -220,12 +240,18 @@ export default function PersonsPage() {
     await db.deletePerson(person);
     const allPersons = await db.getPersonsByArea(selectedArea);
     setPersons(allPersons);
-    if (!isEditing) setPersonConnectionNumber(getNextConnectionNumber(allPersons));
+    if (!isEditing)
+      setPersonConnectionNumber(getNextConnectionNumber(allPersons));
   };
 
   const disconnectPerson = async (person: any) => {
     if (!db) return;
-    if (!confirm(`Disconnect ${person.name} (Conn #${person.connectionNumber || "unknown"})? They will be moved to the Disconnection List.`)) return;
+    if (
+      !confirm(
+        `Disconnect ${person.name} (Conn #${person.connectionNumber || "unknown"})? They will be moved to the Disconnection List.`,
+      )
+    )
+      return;
     try {
       await db.moveToDisconnected(person);
       const allPersons = await db.getPersonsByArea(selectedArea);
@@ -238,7 +264,12 @@ export default function PersonsPage() {
 
   const moveToDefaulterList = async (person: any) => {
     if (!db) return;
-    if (!confirm(`Move ${person.name} (Conn #${person.connectionNumber || "unknown"}) to the defaulter list?`)) return;
+    if (
+      !confirm(
+        `Move ${person.name} (Conn #${person.connectionNumber || "unknown"}) to the defaulter list?`,
+      )
+    )
+      return;
     try {
       await db.moveTodefalterList(person);
       const allPersons = await db.getPersonsByArea(selectedArea);
@@ -251,15 +282,28 @@ export default function PersonsPage() {
 
   // ─── Print receipt ────────────────────────────────────────────────────────
   const printReceipt = () => {
-    if (!personName.trim() || !personConnectionNumber.trim() || !personReceiptNo.trim() || !personAddress.trim() || monthlyFee === "") {
+    if (
+      !personName.trim() ||
+      !personConnectionNumber.trim() ||
+      !personReceiptNo.trim() ||
+      !personAddress.trim() ||
+      monthlyFee === ""
+    ) {
       alert("Please fill all person details before printing receipt");
       return;
     }
-    if (!selectedArea) { alert("Please select an area"); return; }
+    if (!selectedArea) {
+      alert("Please select an area");
+      return;
+    }
 
-    const selectedAreaName = areas.find((a) => a._id === selectedArea)?.name || "";
+    const selectedAreaName =
+      areas.find((a) => a._id === selectedArea)?.name || "";
     const printWindow = window.open("", "_blank", "width=800,height=600");
-    if (!printWindow) { alert("Please allow pop-ups to print receipt"); return; }
+    if (!printWindow) {
+      alert("Please allow pop-ups to print receipt");
+      return;
+    }
 
     printWindow.document.write(`
       <!DOCTYPE html>
@@ -322,7 +366,10 @@ export default function PersonsPage() {
   // ─── Print persons list ───────────────────────────────────────────────────
   const printPersonsList = () => {
     const printWindow = window.open("", "_blank", "width=800,height=600");
-    if (!printWindow) { alert("Please allow pop-ups to print the persons list"); return; }
+    if (!printWindow) {
+      alert("Please allow pop-ups to print the persons list");
+      return;
+    }
 
     printWindow.document.write(`
       <!DOCTYPE html>
@@ -350,7 +397,9 @@ export default function PersonsPage() {
             </tr>
           </thead>
           <tbody>
-            ${persons.map((person) => `
+            ${persons
+              .map(
+                (person) => `
               <tr>
                 <td>${person.receiptNo ?? "-"}</td>
                 <td>${person.connectionNumber ?? "-"}</td>
@@ -363,7 +412,9 @@ export default function PersonsPage() {
                 </td>
                 <td>Active</td>
               </tr>
-            `).join("")}
+            `,
+              )
+              .join("")}
           </tbody>
         </table>
         <script>window.onload = function() { window.print(); setTimeout(function() { window.close(); }, 1000); };</script>
@@ -386,13 +437,19 @@ export default function PersonsPage() {
 
       {/* Header */}
       <div className="mb-8">
-        <h1 className="text-3xl font-bold text-gray-800 mb-2">Persons Management</h1>
-        <p className="text-gray-600">Add and manage persons in different areas</p>
+        <h1 className="text-3xl font-bold text-gray-800 mb-2">
+          Persons Management
+        </h1>
+        <p className="text-gray-600">
+          Add and manage persons in different areas
+        </p>
       </div>
 
       {/* Area Selection */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-8">
-        <h2 className="text-xl font-semibold text-gray-800 mb-4">Select Area</h2>
+        <h2 className="text-xl font-semibold text-gray-800 mb-4">
+          Select Area
+        </h2>
         <select
           value={selectedArea}
           onChange={(e) => loadPersons(e.target.value)}
@@ -418,7 +475,9 @@ export default function PersonsPage() {
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
               Person Connection #
-              <span className="ml-1 text-xs text-blue-500 font-normal">(auto-filled)</span>
+              <span className="ml-1 text-xs text-blue-500 font-normal">
+                (auto-filled)
+              </span>
             </label>
             <input
               ref={connectionRef}
@@ -447,7 +506,9 @@ export default function PersonsPage() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Person Name</label>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Person Name
+            </label>
             <input
               ref={nameRef}
               type="text"
@@ -463,7 +524,9 @@ export default function PersonsPage() {
         {/* Row 2: Address, Monthly Fee, Phone Number */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Address</label>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Address
+            </label>
             <input
               ref={addressRef}
               type="text"
@@ -474,22 +537,34 @@ export default function PersonsPage() {
               className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-800 placeholder-gray-500"
             />
           </div>
-
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Monthly Fee</label>
-            <input
-              ref={feeRef}
-              type="number"
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Monthly Fee
+            </label>
+            <select
+              ref={feeRef as any}
               value={monthlyFee === "" ? "" : monthlyFee}
-              onChange={(e) => setMonthlyFee(e.target.value === "" ? "" : Number(e.target.value))}
+              onChange={(e) =>
+                setMonthlyFee(
+                  e.target.value === "" ? "" : Number(e.target.value),
+                )
+              }
               onKeyDown={(e) => handleKeyDown(e, phoneRef)}
-              placeholder="Enter monthly fee"
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-800 placeholder-gray-500"
-            />
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-800 bg-white"
+            >
+              <option value="">-- Select Fee --</option>
+              {feeList.map((fee) => (
+                <option key={fee._id} value={fee.amount}>
+                  {fee.description} — Rs.{Number(fee.amount).toFixed(2)}
+                </option>
+              ))}
+            </select>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Phone Number</label>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Phone Number
+            </label>
             <input
               ref={phoneRef}
               type="tel"
@@ -538,8 +613,12 @@ export default function PersonsPage() {
       {selectedArea && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
           <div className="px-6 py-4 border-b border-gray-200">
-            <h2 className="text-xl font-semibold text-gray-800">Persons in Selected Area</h2>
-            <p className="text-sm text-gray-500 mt-1">{filteredPersons.length} person(s) found</p>
+            <h2 className="text-xl font-semibold text-gray-800">
+              Persons in Selected Area
+            </h2>
+            <p className="text-sm text-gray-500 mt-1">
+              {filteredPersons.length} person(s) found
+            </p>
 
             <div className="mt-4 flex flex-col md:flex-row gap-3">
               <input
@@ -560,21 +639,42 @@ export default function PersonsPage() {
 
           {persons.length === 0 ? (
             <div className="p-8 text-center">
-              <div className="text-gray-400 text-lg mb-2">No persons found in this area</div>
-              <p className="text-gray-500">Add your first person using the form above</p>
+              <div className="text-gray-400 text-lg mb-2">
+                No persons found in this area
+              </div>
+              <p className="text-gray-500">
+                Add your first person using the form above
+              </p>
             </div>
           ) : filteredPersons.length === 0 ? (
             <div className="p-8 text-center">
-              <div className="text-gray-400 text-lg mb-2">No matching person found</div>
-              <p className="text-gray-500">Try another name, connection number, or address</p>
+              <div className="text-gray-400 text-lg mb-2">
+                No matching person found
+              </div>
+              <p className="text-gray-500">
+                Try another name, connection number, or address
+              </p>
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-gray-200">
                 <thead className="bg-gray-50">
                   <tr>
-                    {["Receipt No", "Conn #", "Person Name", "Address", "Phone", "Monthly Fee", "Pending Amount", "Status", "Actions"].map((h) => (
-                      <th key={h} className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    {[
+                      "Receipt No",
+                      "Conn #",
+                      "Person Name",
+                      "Address",
+                      "Phone",
+                      "Monthly Fee",
+                      "Pending Amount",
+                      "Status",
+                      "Actions",
+                    ].map((h) => (
+                      <th
+                        key={h}
+                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider"
+                      >
                         {h}
                       </th>
                     ))}
@@ -582,31 +682,48 @@ export default function PersonsPage() {
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
                   {filteredPersons.map((person) => (
-                    <tr key={person._id} className="hover:bg-gray-50 transition-colors duration-150">
+                    <tr
+                      key={person._id}
+                      className="hover:bg-gray-50 transition-colors duration-150"
+                    >
                       <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm font-medium text-blue-700">{person.receiptNo ?? "-"}</div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm text-gray-900">{person.connectionNumber ?? "-"}</div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm font-medium text-gray-900">{person.name}</div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm text-gray-500">
-                          {person.address && person.address !== "-" ? person.address : "-"}
+                        <div className="text-sm font-medium text-blue-700">
+                          {person.receiptNo ?? "-"}
                         </div>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm text-gray-500">{person.phoneNumber || "-"}</div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm text-gray-500">
-                          {person.amount ? `Rs.${Number(person.amount).toFixed(2)}` : "-"}
+                        <div className="text-sm text-gray-900">
+                          {person.connectionNumber ?? "-"}
                         </div>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
-                        <div className={`text-sm font-medium ${Number(person.remainingBalance || 0) > 0 ? "text-red-600" : "text-gray-500"}`}>
+                        <div className="text-sm font-medium text-gray-900">
+                          {person.name}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm text-gray-500">
+                          {person.address && person.address !== "-"
+                            ? person.address
+                            : "-"}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm text-gray-500">
+                          {person.phoneNumber || "-"}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm text-gray-500">
+                          {person.amount
+                            ? `Rs.${Number(person.amount).toFixed(2)}`
+                            : "-"}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div
+                          className={`text-sm font-medium ${Number(person.remainingBalance || 0) > 0 ? "text-red-600" : "text-gray-500"}`}
+                        >
                           Rs.{Number(person.remainingBalance || 0).toFixed(2)}
                         </div>
                       </td>
@@ -668,18 +785,26 @@ export default function PersonsPage() {
           <div className="flex justify-between items-start">
             <div>
               <p className="text-sm font-medium text-gray-600">Total Persons</p>
-              <p className="text-2xl font-bold text-gray-900 mt-2">{persons.length}</p>
+              <p className="text-2xl font-bold text-gray-900 mt-2">
+                {persons.length}
+              </p>
             </div>
-            <span className="text-xs font-semibold px-2 py-1 rounded bg-blue-100 text-blue-800">Area</span>
+            <span className="text-xs font-semibold px-2 py-1 rounded bg-blue-100 text-blue-800">
+              Area
+            </span>
           </div>
-          <p className="text-xs text-gray-500 mt-4">All persons in selected area</p>
+          <p className="text-xs text-gray-500 mt-4">
+            All persons in selected area
+          </p>
         </div>
 
         <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
           <div className="flex justify-between items-start">
             <div>
               <p className="text-sm font-medium text-gray-600">Active Areas</p>
-              <p className="text-2xl font-bold text-gray-900 mt-2">{areas.length}</p>
+              <p className="text-2xl font-bold text-gray-900 mt-2">
+                {areas.length}
+              </p>
             </div>
             <span className="text-xs font-semibold px-2 py-1 rounded bg-green-100 text-green-800">
               {areas.length > 0 ? "Ready" : "None"}
@@ -693,14 +818,20 @@ export default function PersonsPage() {
             <div>
               <p className="text-sm font-medium text-gray-600">Selected Area</p>
               <p className="text-2xl font-bold text-gray-900 mt-2">
-                {selectedArea ? areas.find((a) => a._id === selectedArea)?.name : "None"}
+                {selectedArea
+                  ? areas.find((a) => a._id === selectedArea)?.name
+                  : "None"}
               </p>
             </div>
-            <span className={`text-xs font-semibold px-2 py-1 rounded ${selectedArea ? "bg-purple-100 text-purple-800" : "bg-gray-100 text-gray-800"}`}>
+            <span
+              className={`text-xs font-semibold px-2 py-1 rounded ${selectedArea ? "bg-purple-100 text-purple-800" : "bg-gray-100 text-gray-800"}`}
+            >
               {selectedArea ? "✓" : "✗"}
             </span>
           </div>
-          <p className="text-xs text-gray-500 mt-4">{selectedArea ? "Area selected" : "No area selected"}</p>
+          <p className="text-xs text-gray-500 mt-4">
+            {selectedArea ? "Area selected" : "No area selected"}
+          </p>
         </div>
       </div>
     </div>

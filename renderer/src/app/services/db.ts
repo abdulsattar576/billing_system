@@ -238,6 +238,40 @@ export const initDB = async () => {
           doc && !doc._deleted && doc.type === "person" && doc.status === "disconnected"
       );
   };
+// fee_list
+const createFeeList = async (description: string, amount: number) => {
+  const doc = {
+    _id: `fee_${Date.now()}`,
+    type: "feeList",
+    description,
+    amount: Number(amount),
+    createdAt: new Date().toISOString(),
+  };
+
+  return localDB.put(doc);
+};
+//get_feeList
+const getFeeList = async () => {
+  const res = await localDB.find({
+    selector: { type: "feeList" },
+  });
+
+  return res.docs;
+};
+// update fee list
+const updateFeeList = async (fee: any, updates: any) => {
+  if (!fee._id || !fee._rev) throw new Error("_id and _rev required");
+
+  return localDB.put({
+    ...fee,
+    ...updates,
+    updatedAt: new Date().toISOString(),
+  });
+};
+// delete fee list
+const deleteFeeList = async (fee: any) => {
+  return localDB.remove(fee);
+};
 
   const deletePerson = async (person: any) => {
     try {
@@ -505,5 +539,9 @@ export const initDB = async () => {
     createUser,
     getUser,
     getAllUsers,
+    createFeeList,
+getFeeList,
+updateFeeList,
+deleteFeeList,
   };
 };

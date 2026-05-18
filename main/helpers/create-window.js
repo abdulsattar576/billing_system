@@ -1,68 +1,34 @@
-const { screen, BrowserWindow } = require('electron')
-const Store = require('electron-store')
+const { screen, BrowserWindow } = require("electron");
+const Store = require("electron-store");
 
 const createWindow = (windowName, options) => {
-  const key = 'window-state'
-  const name = `window-state-${windowName}`
-  const store = new Store({ name })
+  const store = new Store({ name: `window-state-${windowName}` });
+
   const defaultSize = {
-    width: options.width,
-    height: options.height,
-  }
-  let state = {}
+    width: options.width || 1000,
+    height: options.height || 600,
+  };
 
-  const restore = () => store.get(key, defaultSize)
+  let win; // ✅ declare first
 
-  const getCurrentPosition = () => {
-    const position = win.getPosition()
-    const size = win.getSize()
-    return {
-      x: position[0],
-      y: position[1],
-      width: size[0],
-      height: size[1],
+  const getState = () => {
+    const saved = store.get("window-state");
+
+    if (!saved) {
+      const bounds = screen.getPrimaryDisplay().bounds;
+      return {
+        x: Math.round((bounds.width - defaultSize.width) / 2),
+        y: Math.round((bounds.height - defaultSize.height) / 2),
+        ...defaultSize,
+      };
     }
-  }
 
-  const windowWithinBounds = (windowState, bounds) => {
-    return (
-      windowState.x >= bounds.x &&
-      windowState.y >= bounds.y &&
-      windowState.x + windowState.width <= bounds.x + bounds.width &&
-      windowState.y + windowState.height <= bounds.y + bounds.height
-    )
-  }
+    return saved;
+  };
 
-  const resetToDefaults = () => {
-    const bounds = screen.getPrimaryDisplay().bounds
-    return Object.assign({}, defaultSize, {
-      x: (bounds.width - defaultSize.width) / 2,
-      y: (bounds.height - defaultSize.height) / 2,
-    })
-  }
+  const state = getState();
 
-  const ensureVisibleOnSomeDisplay = (windowState) => {
-    const visible = screen.getAllDisplays().some((display) => {
-      return windowWithinBounds(windowState, display.bounds)
-    })
-    if (!visible) {
-      // Window is partially or fully not visible now.
-      // Reset it to safe defaults.
-      return resetToDefaults()
-    }
-    return windowState
-  }
-
-  const saveState = () => {
-    if (!win.isMinimized() && !win.isMaximized()) {
-      Object.assign(state, getCurrentPosition())
-    }
-    store.set(key, state)
-  }
-
-  state = ensureVisibleOnSomeDisplay(restore())
-
-  const win = new BrowserWindow({
+  win = new BrowserWindow({
     ...state,
     ...options,
     webPreferences: {
@@ -70,11 +36,20 @@ const createWindow = (windowName, options) => {
       contextIsolation: true,
       ...options.webPreferences,
     },
-  })
+  });
 
-  win.on('close', saveState)
+  const saveState = () => {
+    if (!win.isMinimized() && !win.isMaximized()) {
+      const [x, y] = win.getPosition();
+      const [width, height] = win.getSize();
 
-  return win
-}
+      store.set("window-state", { x, y, width, height });
+    }
+  };
 
-module.exports = { createWindow }
+  win.on("close", saveState);
+
+  return win;
+};
+
+module.exports = { createWindow };
