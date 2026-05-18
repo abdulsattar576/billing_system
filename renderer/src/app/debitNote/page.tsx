@@ -12,34 +12,28 @@ export default function CashReceivedPage() {
   const [receiptNo, setReceiptNo] = useState("");
   const [amount, setAmount] = useState<number | "">("");
   const [description, setDescription] = useState("");
-  const [paymentMonth, setPaymentMonth] = useState(() =>
-    new Date().toISOString().slice(0, 7),
-  );
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
   const [connectionQuery, setConnectionQuery] = useState("");
   const [connectionSuggestions, setConnectionSuggestions] = useState<any[]>([]);
-  const [outstandingBalance, setOutstandingBalance] = useState(0);
-  const [lastReceiptNo, setLastReceiptNo] = useState("");
+  const [customerBalance, setCustomerBalance] = useState(0);
+  const [pendingMonths, setPendingMonths] = useState<any[]>([]);
+  const [lastSavedPayment, setLastSavedPayment] = useState<any>(null);
 
   const receiptRef = useRef<HTMLInputElement>(null);
   const amountRef = useRef<HTMLInputElement>(null);
-  const descRef = useRef<HTMLTextAreaElement>(null);
 
-  // Generate next receipt number
   const generateReceiptNo = async () => {
     if (!db) return "0001";
-
     try {
       const res = await db.localDB.allDocs({ include_docs: true });
       const payments = res.rows
         .map((r: any) => r.doc)
-        .filter((d: any) => d && !d._deleted && d.type === "payment");
-
+        .filter((d: any) => d && !d._deleted && (d.type === "payment" || d.type === "debit-payment"));
       const maxReceiptNo = payments.reduce((max: number, p: any) => {
         const num = parseInt(p.receiptNo, 10);
         return !isNaN(num) && num > max ? num : max;
       }, 0);
-
       return String(maxReceiptNo + 1).padStart(4, "0");
     } catch (e) {
       return "0001";
@@ -57,7 +51,6 @@ export default function CashReceivedPage() {
         const all = await pouch.getAllPersons();
         setAllPersons(all || []);
         const nextReceipt = await generateReceiptNo();
-        setLastReceiptNo(nextReceipt);
         setReceiptNo(nextReceipt);
       } catch (e) {
         console.warn("failed to load areas/persons", e);
@@ -67,72 +60,24 @@ export default function CashReceivedPage() {
     setup();
   }, []);
 
-  // Calculate outstanding balance when person is selected
+  // Refresh balance and pending months using db service
+  const refreshCustomerData = async (personId: string) => {
+    if (!db || !personId) return;
+    try {
+      const balance = await db.calculateCustomerBalance(personId);
+      const pending = await db.getPendingMonths(personId);
+      setCustomerBalance(balance);
+      setPendingMonths(pending);
+    } catch (e) {
+      console.error("Failed to refresh customer data", e);
+    }
+  };
+
   useEffect(() => {
-    const calculateBalance = async () => {
-      if (!db || !selectedPersonId) {
-        setOutstandingBalance(0);
-        return;
-      }
-
-      try {
-        const res = await db.localDB.allDocs({ include_docs: true });
-        const docs = res.rows
-          .map((r: any) => r.doc)
-          .filter(
-            (d: any) => d && !d._deleted && d.personId === selectedPersonId,
-          );
-
-        // Calculate expected monthly fees based on connection date
-        const monthlyFee = Number(selectedPerson?.amount || 0);
-        const connectionDate = new Date(selectedPerson?.createdAt);
-        const currentDate = new Date();
-
-        // Calculate how many months fees are due (from month after connection to current month)
-        let monthsDue = 0;
-        let feeDate = new Date(
-          connectionDate.getFullYear(),
-          connectionDate.getMonth() + 1,
-          1,
-        );
-        const today = new Date(
-          currentDate.getFullYear(),
-          currentDate.getMonth(),
-          1,
-        );
-
-        while (feeDate <= today) {
-          monthsDue++;
-          feeDate.setMonth(feeDate.getMonth() + 1);
-        }
-
-        const expectedTotal = monthlyFee * monthsDue;
-
-        // Total payments received
-        const totalPayments = docs
-          .filter((d: any) => d.type === "payment")
-          .reduce((sum: number, d: any) => sum + Number(d.amount || 0), 0);
-
-        // Total concessions
-        const totalConcessions = docs
-          .filter((d: any) => d.type === "credit-note")
-          .reduce((sum: number, d: any) => sum + Number(d.amount || 0), 0);
-
-        // Total purchases (debits)
-        const totalPurchases = docs
-          .filter((d: any) => d.type === "customer-debit")
-          .reduce((sum: number, d: any) => sum + Number(d.amount || 0), 0);
-
-        const balance =
-          expectedTotal + totalPurchases - totalPayments - totalConcessions;
-        setOutstandingBalance(Math.max(0, balance));
-      } catch (e) {
-        console.error("Failed to calculate balance", e);
-      }
-    };
-
-    calculateBalance();
-  }, [db, selectedPersonId, selectedPerson]);
+    if (selectedPersonId) {
+      refreshCustomerData(selectedPersonId);
+    }
+  }, [db, selectedPersonId]);
 
   const onAreaChange = async (areaId: string) => {
     setSelectedArea(areaId);
@@ -142,7 +87,9 @@ export default function CashReceivedPage() {
     setConnectionSuggestions([]);
     setAmount("");
     setDescription("");
-    setOutstandingBalance(0);
+    setCustomerBalance(0);
+    setPendingMonths([]);
+    setLastSavedPayment(null);
     const nextReceipt = await generateReceiptNo();
     setReceiptNo(nextReceipt);
   };
@@ -152,6 +99,7 @@ export default function CashReceivedPage() {
     setSelectedPerson(person);
     setConnectionQuery(String(person.connectionNumber ?? ""));
     setConnectionSuggestions([]);
+    setLastSavedPayment(null);
     setTimeout(() => amountRef.current?.focus(), 100);
   };
 
@@ -159,17 +107,15 @@ export default function CashReceivedPage() {
     setConnectionQuery(q);
     setSelectedPersonId("");
     setSelectedPerson(null);
-
+    setLastSavedPayment(null);
     if (!q.trim()) {
       setConnectionSuggestions([]);
       return;
     }
-
     const qLower = q.toLowerCase();
     const personsList = selectedArea
       ? allPersons.filter((p) => p.areaId === selectedArea)
       : allPersons;
-
     const filtered = personsList
       .filter((p) => {
         const conn = String(p.connectionNumber ?? "").toLowerCase();
@@ -177,17 +123,12 @@ export default function CashReceivedPage() {
         return conn.includes(qLower) || name.includes(qLower);
       })
       .slice(0, 20);
-
     setConnectionSuggestions(filtered);
   };
 
   const printReceipt = () => {
-    if (!selectedPerson) {
-      alert("Please select a customer first");
-      return;
-    }
-    if (amount === "" || Number(amount) <= 0) {
-      alert("Please enter a valid amount");
+    if (!lastSavedPayment) {
+      alert("No payment to print. Please save a payment first.");
       return;
     }
 
@@ -200,29 +141,22 @@ export default function CashReceivedPage() {
 
     printWindow.document.write(`
       <!DOCTYPE html>
-      <html lang="en">
+      <html>
       <head>
         <meta charset="UTF-8">
         <title>Payment Receipt</title>
         <style>
           * { margin: 0; padding: 0; box-sizing: border-box; }
-          body { font-family: Arial, sans-serif; padding: 20px; background: #fff; }
+          body { font-family: Arial, sans-serif; padding: 20px; }
           .receipt { max-width: 400px; margin: 0 auto; border: 2px solid #333; border-radius: 10px; padding: 20px; }
           .header { text-align: center; border-bottom: 2px solid #333; padding-bottom: 15px; margin-bottom: 20px; }
-          .urdu { font-family: 'Noto Nastaliq Urdu', 'Arial', sans-serif; direction: rtl; font-size: 20px; font-weight: bold; margin-bottom: 5px; }
+          .urdu { font-family: 'Noto Nastaliq Urdu', Arial; direction: rtl; font-size: 20px; font-weight: bold; }
           .title { font-size: 18px; font-weight: bold; color: #555; }
-          .receipt-no { text-align: right; font-size: 12px; color: #666; margin-bottom: 15px; }
-          .date { text-align: right; font-size: 12px; color: #666; margin-bottom: 20px; }
           .detail-row { display: flex; justify-content: space-between; margin-bottom: 10px; padding: 5px 0; border-bottom: 1px dashed #ddd; }
-          .label { font-weight: bold; color: #555; }
-          .value { color: #333; }
+          .label { font-weight: bold; }
           .total { margin-top: 20px; padding-top: 15px; border-top: 2px solid #333; font-size: 18px; font-weight: bold; }
-          .total .label, .total .value { font-size: 18px; }
-          .footer { text-align: center; margin-top: 30px; padding-top: 15px; border-top: 1px solid #ddd; font-size: 11px; color: #888; }
-          .thank-you { text-align: center; margin-top: 20px; font-style: italic; color: #555; }
           .balance { margin-top: 15px; padding: 10px; background: #f0f0f0; border-radius: 5px; text-align: center; }
-          .balance .label { font-weight: bold; }
-          .balance .value { font-weight: bold; font-size: 16px; }
+          .footer { text-align: center; margin-top: 30px; font-size: 11px; color: #888; }
         </style>
       </head>
       <body>
@@ -231,178 +165,143 @@ export default function CashReceivedPage() {
             <div class="urdu">فیملی کیبل نیٹ ورک</div>
             <div class="title">CASH RECEIPT</div>
           </div>
-          
-          <div class="receipt-no">
-            <strong>Receipt #:</strong> ${receiptNo}
-          </div>
-          
-          <div class="date">
-            <strong>Date:</strong> ${new Date().toLocaleDateString()} | <strong>Time:</strong> ${new Date().toLocaleTimeString()}
-          </div>
-          
-          <div class="detail-row">
-            <span class="label">Connection #:</span>
-            <span class="value">${selectedPerson?.connectionNumber || "-"}</span>
-          </div>
-          
-          <div class="detail-row">
-            <span class="label">Customer Name:</span>
-            <span class="value">${selectedPerson?.name || "-"}</span>
-          </div>
-          
-          <div class="detail-row">
-            <span class="label">Area:</span>
-            <span class="value">${areaName}</span>
-          </div>
-          
-          <div class="detail-row">
-            <span class="label">Address:</span>
-            <span class="value">${selectedPerson?.address || "-"}</span>
-          </div>
-          
-          <div class="detail-row">
-            <span class="label">Payment For Month:</span>
-            <span class="value">${new Date(paymentMonth + "-01").toLocaleString("default", { month: "long", year: "numeric" })}</span>
-          </div>
-          
-          <div class="detail-row">
-            <span class="label">Description:</span>
-            <span class="value">${description || "Monthly Fee Payment"}</span>
-          </div>
-          
-          <div class="total">
-            <span class="label">Amount Received:</span>
-            <span class="value">Rs. ${Number(amount).toFixed(2)}</span>
-          </div>
-          
-          <div class="balance">
-            <span class="label">Outstanding Balance:</span>
-            <span class="value" style="color: ${outstandingBalance - Number(amount) > 0 ? "#dc2626" : "#16a34a"}">
-              Rs. ${Math.max(0, outstandingBalance - Number(amount)).toFixed(2)}
-            </span>
-          </div>
-          
-          <div class="thank-you">
-            Thank you for your payment!
-          </div>
-          
-          <div class="footer">
-            <p>This is a computer generated receipt</p>
-            <p>No signature required</p>
-            <p>Please keep this receipt for future reference</p>
-          </div>
+          <div class="detail-row"><span class="label">Receipt #:</span><span>${lastSavedPayment.receiptNo}</span></div>
+          <div class="detail-row"><span class="label">Date:</span><span>${new Date().toLocaleString()}</span></div>
+          <div class="detail-row"><span class="label">Connection #:</span><span>${selectedPerson?.connectionNumber}</span></div>
+          <div class="detail-row"><span class="label">Customer Name:</span><span>${selectedPerson?.name}</span></div>
+          <div class="detail-row"><span class="label">Area:</span><span>${areaName}</span></div>
+          <div class="detail-row"><span class="label">Address:</span><span>${selectedPerson?.address}</span></div>
+          <div class="detail-row"><span class="label">Paid Months:</span><span>${lastSavedPayment.paidMonths.join(", ")}</span></div>
+          ${lastSavedPayment.debitAmount > 0 ? `<div class="detail-row"><span class="label">Debit Payment:</span><span>Rs. ${lastSavedPayment.debitAmount.toFixed(2)}</span></div>` : ""}
+          <div class="total"><span class="label">Total Amount:</span><span>Rs. ${lastSavedPayment.totalAmount.toFixed(2)}</span></div>
+          <div class="balance"><span class="label">New Balance:</span><span>${lastSavedPayment.newBalance >= 0 ? `Rs. ${lastSavedPayment.newBalance.toFixed(2)}` : `-Rs. ${Math.abs(lastSavedPayment.newBalance).toFixed(2)}`}</span></div>
+          <div class="footer">Thank you for your payment!</div>
         </div>
-        <script>
-          window.onload = function() { 
-            window.print(); 
-            setTimeout(function() { window.close(); }, 1000);
-          };
-        </script>
+        <script>window.onload=()=>{window.print();setTimeout(()=>window.close(),1000)}</script>
       </body>
       </html>
     `);
     printWindow.document.close();
   };
 
-  const addPayment = async () => {
+  const savePayment = async () => {
     if (!db || !selectedPersonId) {
-      alert("Please select a connection number (person)");
+      alert("Please select a customer");
       return;
     }
     if (!receiptNo.trim()) {
-      alert("Please enter a receipt number");
+      alert("Please enter receipt number");
       return;
     }
     if (amount === "" || Number(amount) <= 0) {
       alert("Please enter a valid amount");
       return;
     }
-    if (!description.trim()) {
-      alert("Please enter a description");
-      return;
-    }
+
+    setSaving(true);
+    let remainingAmount = Number(amount);
+    const paidMonths: string[] = [];
+    let debitPayment = 0;
 
     try {
-      const now = new Date().toISOString();
+      // Step 1: FIRST deduct pending monthly fees (oldest first)
+      for (const month of pendingMonths) {
+        if (remainingAmount >= month.amount) {
+          // Full month paid
+          const paymentDoc = {
+            _id: `payment_${selectedPersonId}_${month.month}_${Date.now()}`,
+            type: "payment",
+            areaId: selectedArea,
+            personId: selectedPersonId,
+            connectionNumber: connectionQuery,
+            personName: selectedPerson?.name,
+            personAddress: selectedPerson?.address,
+            receiptNo: receiptNo.trim(),
+            amount: month.amount,
+            description: `Monthly fee payment for ${month.monthName}`,
+            paymentMonth: month.month,
+            createdAt: new Date().toISOString(),
+          };
+          await db.localDB.put(paymentDoc);
+          paidMonths.push(month.monthName);
+          remainingAmount -= month.amount;
+        } else if (remainingAmount > 0) {
+          // Partial month payment
+          const paymentDoc = {
+            _id: `payment_${selectedPersonId}_${month.month}_${Date.now()}`,
+            type: "payment",
+            areaId: selectedArea,
+            personId: selectedPersonId,
+            connectionNumber: connectionQuery,
+            personName: selectedPerson?.name,
+            personAddress: selectedPerson?.address,
+            receiptNo: receiptNo.trim(),
+            amount: remainingAmount,
+            description: `Partial payment for ${month.monthName}`,
+            paymentMonth: month.month,
+            createdAt: new Date().toISOString(),
+          };
+          await db.localDB.put(paymentDoc);
+          paidMonths.push(`${month.monthName} (Partial)`);
+          remainingAmount = 0;
+          break;
+        } else {
+          break;
+        }
+      }
 
-      const paymentDoc = {
-        _id: `payment_${selectedPersonId}_${Date.now()}`,
-        type: "payment",
-        areaId: selectedArea,
-        personId: selectedPersonId,
-        connectionNumber: connectionQuery,
-        personName: selectedPerson?.name,
-        personAddress: selectedPerson?.address,
-        receiptNo: receiptNo.trim(),
-        amount: Number(amount),
-        description: description.trim(),
-        paymentMonth: paymentMonth,
-        createdAt: now,
-      };
+      // Step 2: SECOND remaining amount goes to debit (udhar) balance
+      if (remainingAmount > 0) {
+        debitPayment = remainingAmount;
+        const debitPaymentDoc = {
+          _id: `debit_payment_${selectedPersonId}_${Date.now()}`,
+          type: "debit-payment",
+          areaId: selectedArea,
+          personId: selectedPersonId,
+          connectionNumber: connectionQuery,
+          personName: selectedPerson?.name,
+          personAddress: selectedPerson?.address,
+          receiptNo: receiptNo.trim(),
+          amount: remainingAmount,
+          description: description.trim() || "Payment towards outstanding debit balance",
+          createdAt: new Date().toISOString(),
+        };
+        await db.localDB.put(debitPaymentDoc);
+      }
 
-      await db.localDB.put(paymentDoc);
+      // Step 3: Refresh balance from database (this ensures consistency)
+      await refreshCustomerData(selectedPersonId);
 
-      // Print receipt after successful save
-      printReceipt();
+      // Store saved payment details for printing
+      setLastSavedPayment({
+        receiptNo: receiptNo,
+        paidMonths: paidMonths,
+        debitAmount: debitPayment,
+        totalAmount: Number(amount),
+        newBalance: customerBalance + Number(amount), // Payment increases balance
+      });
 
       // Generate next receipt number
       const nextReceipt = await generateReceiptNo();
       setReceiptNo(nextReceipt);
-
-      // Clear form
       setAmount("");
       setDescription("");
-
-      // Refresh balance
-      const res = await db.localDB.allDocs({ include_docs: true });
-      const docs = res.rows
-        .map((r: any) => r.doc)
-        .filter(
-          (d: any) => d && !d._deleted && d.personId === selectedPersonId,
-        );
-
-      const monthlyFee = Number(selectedPerson?.amount || 0);
-      const connectionDate = new Date(selectedPerson?.createdAt);
-      const currentDate = new Date();
-
-      let monthsDue = 0;
-      let feeDate = new Date(
-        connectionDate.getFullYear(),
-        connectionDate.getMonth() + 1,
-        1,
-      );
-      const today = new Date(
-        currentDate.getFullYear(),
-        currentDate.getMonth(),
-        1,
-      );
-
-      while (feeDate <= today) {
-        monthsDue++;
-        feeDate.setMonth(feeDate.getMonth() + 1);
-      }
-
-      const expectedTotal = monthlyFee * monthsDue;
-
-      const totalPayments = docs
-        .filter((d: any) => d.type === "payment")
-        .reduce((sum: number, d: any) => sum + Number(d.amount || 0), 0);
-
-      const totalConcessions = docs
-        .filter((d: any) => d.type === "credit-note")
-        .reduce((sum: number, d: any) => sum + Number(d.amount || 0), 0);
-
-      const totalPurchases = docs
-        .filter((d: any) => d.type === "customer-debit")
-        .reduce((sum: number, d: any) => sum + Number(d.amount || 0), 0);
-
-      const balance =
-        expectedTotal + totalPurchases - totalPayments - totalConcessions;
-      setOutstandingBalance(Math.max(0, balance));
+      
+      const balanceStatus = customerBalance + Number(amount);
+      alert(`✅ Payment saved successfully!\n\n📌 Paid Months: ${paidMonths.join(", ")}\n💰 Debit Payment: Rs. ${debitPayment.toFixed(2)}\n📊 New Balance: ${balanceStatus >= 0 ? `Rs. ${balanceStatus.toFixed(2)}` : `-Rs. ${Math.abs(balanceStatus).toFixed(2)}`}`);
+      
     } catch (e: any) {
       console.error(e);
       alert("Failed to save payment: " + e.message);
+    } finally {
+      setSaving(false);
     }
+  };
+
+  const formatBalance = (balance: number) => {
+    if (balance === 0) return "Rs. 0";
+    if (balance < 0) return `-Rs. ${Math.abs(balance).toFixed(2)}`;
+    return `Rs. ${balance.toFixed(2)}`;
   };
 
   if (loading) {
@@ -416,20 +315,14 @@ export default function CashReceivedPage() {
   return (
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-black">
-          Cash Received From Customer
-        </h1>
-        <p className="text-sm text-gray-600">
-          Record payments and print receipt
-        </p>
+        <h1 className="text-2xl font-bold text-black">Cash Received From Customer</h1>
+        <p className="text-sm text-gray-600">Positive balance = Customer has credit | Negative balance = Customer owes (Udhari)</p>
       </div>
 
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
         {/* Area Selection */}
         <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Area
-          </label>
+          <label className="block text-sm font-medium text-gray-700 mb-2">Area</label>
           <select
             value={selectedArea}
             onChange={(e) => onAreaChange(e.target.value)}
@@ -446,19 +339,13 @@ export default function CashReceivedPage() {
 
         {/* Connection Number */}
         <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Connection Number / Name
-          </label>
+          <label className="block text-sm font-medium text-gray-700 mb-2">Connection Number / Name</label>
           <div className="relative">
             <input
               type="text"
               value={connectionQuery}
               onChange={(e) => onConnectionQueryChange(e.target.value)}
-              placeholder={
-                selectedArea
-                  ? "Type connection # or name..."
-                  : "Select area first"
-              }
+              placeholder={selectedArea ? "Type connection # or name..." : "Select area first"}
               disabled={!selectedArea}
               className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black disabled:bg-gray-50"
             />
@@ -470,12 +357,8 @@ export default function CashReceivedPage() {
                     onClick={() => onPersonSelect(p)}
                     className="px-4 py-2 hover:bg-blue-50 cursor-pointer text-sm text-black border-b border-gray-100"
                   >
-                    <div className="font-medium">
-                      Conn #{p.connectionNumber ?? "-"} — {p.name}
-                    </div>
-                    <div className="text-xs text-gray-400">
-                      {p.address || "-"}
-                    </div>
+                    <div className="font-medium">Conn #{p.connectionNumber ?? "-"} — {p.name}</div>
+                    <div className="text-xs text-gray-400">{p.address || "-"}</div>
                   </li>
                 ))}
               </ul>
@@ -483,135 +366,165 @@ export default function CashReceivedPage() {
           </div>
         </div>
 
-        {/* Selected Person Details */}
+        {/* Customer Details */}
         {selectedPerson && (
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6 p-4 bg-gray-50 rounded-lg">
-            <div>
-              <label className="block text-xs text-gray-500">
-                Customer Name
-              </label>
-              <div className="text-sm font-medium text-black">
-                {selectedPerson.name}
+          <>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6 p-4 bg-gray-50 rounded-lg">
+              <div>
+                <label className="block text-xs text-gray-500">Customer Name</label>
+                <div className="text-sm font-medium text-black">{selectedPerson.name}</div>
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500">Monthly Fee</label>
+                <div className="text-sm font-medium text-black">Rs.{Number(selectedPerson.amount || 0).toFixed(2)}</div>
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500">Current Balance</label>
+                <div className={`text-sm font-bold ${customerBalance < 0 ? "text-red-600" : customerBalance > 0 ? "text-green-600" : "text-gray-600"}`}>
+                  {formatBalance(customerBalance)}
+                </div>
+                {customerBalance < 0 && <p className="text-xs text-red-500 mt-1">⚠ Customer owes this amount</p>}
+                {customerBalance > 0 && <p className="text-xs text-green-500 mt-1">✓ Customer has credit</p>}
+                {customerBalance === 0 && <p className="text-xs text-gray-500 mt-1">✓ Balance is zero</p>}
               </div>
             </div>
-            <div>
-              <label className="block text-xs text-gray-500">Address</label>
-              <div className="text-sm text-black">
-                {selectedPerson.address || "-"}
+
+            {/* Pending Months - Shows which months are not paid */}
+            {pendingMonths.length > 0 && (
+              <div className="mb-6 p-4 bg-red-50 rounded-lg border border-red-200">
+                <h3 className="text-sm font-semibold text-red-800 mb-2">⚠ Pending Monthly Fees (Udhari)</h3>
+                <div className="space-y-1">
+                  {pendingMonths.map((month, idx) => (
+                    <div key={idx} className="flex justify-between text-sm">
+                      <span>{month.monthName}</span>
+                      <span className="font-medium text-red-600">Rs. {month.amount.toFixed(2)}</span>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-xs text-red-600 mt-2">
+                  ⚠ Payment will FIRST clear these pending months, then remaining goes to debit balance
+                </p>
               </div>
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500">Monthly Fee</label>
-              <div className="text-sm font-medium text-black">
-                Rs.{Number(selectedPerson.amount || 0).toFixed(2)}
-              </div>
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500">
-                Outstanding Balance
-              </label>
-              <div
-                className={`text-sm font-bold ${outstandingBalance > 0 ? "text-red-600" : "text-green-600"}`}
-              >
-                Rs.{outstandingBalance.toFixed(2)}
-              </div>
-            </div>
-          </div>
+            )}
+          </>
         )}
 
         {/* Receipt Number */}
         <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Receipt Number <span className="text-red-500">*</span>
-          </label>
+          <label className="block text-sm font-medium text-gray-700 mb-2">Receipt Number</label>
           <input
             ref={receiptRef}
             type="text"
             value={receiptNo}
             onChange={(e) => setReceiptNo(e.target.value)}
-            placeholder="Auto-generated receipt number"
             className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black bg-blue-50"
           />
-          <p className="text-xs text-gray-400 mt-1">
-            Auto-generated sequential number
-          </p>
         </div>
 
-        {/* Payment Month */}
+        {/* Amount */}
         <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Payment For Month
-          </label>
+          <label className="block text-sm font-medium text-gray-700 mb-2">Amount Received (Rs.)</label>
           <input
-            type="month"
-            value={paymentMonth}
-            onChange={(e) => setPaymentMonth(e.target.value)}
+            ref={amountRef}
+            type="number"
+            value={amount === "" ? "" : amount}
+            onChange={(e) => setAmount(e.target.value === "" ? "" : Number(e.target.value))}
+            placeholder="0.00"
             className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black"
           />
         </div>
 
-        {/* Amount and Description */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Amount Received (Rs.) <span className="text-red-500">*</span>
-            </label>
-            <input
-              ref={amountRef}
-              type="number"
-              value={amount === "" ? "" : amount}
-              onChange={(e) =>
-                setAmount(e.target.value === "" ? "" : Number(e.target.value))
-              }
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  descRef.current?.focus();
-                }
-              }}
-              placeholder="0.00"
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Description
-            </label>
-            <textarea
-              ref={descRef}
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  addPayment();
-                }
-              }}
-              placeholder="e.g., Payment for monthly fee, Partial payment..."
-              rows={1}
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black resize-none"
-            />
-          </div>
+        {/* Description */}
+        <div className="mb-6">
+          <label className="block text-sm font-medium text-gray-700 mb-2">Description (Optional)</label>
+          <textarea
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="Additional notes..."
+            rows={2}
+            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black resize-none"
+          />
         </div>
+
+        {/* Payment Allocation Preview */}
+        {selectedPerson && amount !== "" && Number(amount) > 0 && (
+          <div className="mb-6 p-4 bg-blue-50 rounded-lg border border-blue-200">
+            <h3 className="text-sm font-semibold text-blue-800 mb-2">💰 Payment Allocation Preview</h3>
+            {(() => {
+              let remaining = Number(amount);
+              const allocation = [];
+              let tempBalance = customerBalance;
+              
+              for (const month of pendingMonths) {
+                if (remaining >= month.amount) {
+                  allocation.push({ month: month.monthName, amount: month.amount, type: "✅ Monthly Fee (Cleared)" });
+                  remaining -= month.amount;
+                  tempBalance += month.amount;
+                } else if (remaining > 0) {
+                  allocation.push({ month: month.monthName, amount: remaining, type: "⚠️ Monthly Fee (Partial)" });
+                  tempBalance += remaining;
+                  remaining = 0;
+                  break;
+                } else {
+                  break;
+                }
+              }
+              if (remaining > 0) {
+                allocation.push({ month: "Debit Balance (Udhar)", amount: remaining, type: "💰 Debit Payment" });
+                tempBalance += remaining;
+              }
+              
+              return (
+                <div className="space-y-2">
+                  {allocation.map((item, idx) => (
+                    <div key={idx} className="flex justify-between text-sm">
+                      <span>{item.month}</span>
+                      <span className="font-medium">Rs. {item.amount.toFixed(2)}</span>
+                    </div>
+                  ))}
+                  <div className="mt-3 pt-2 border-t border-blue-200">
+                    <div className="flex justify-between text-sm font-bold">
+                      <span>Current Balance:</span>
+                      <span className={customerBalance < 0 ? "text-red-600" : "text-green-600"}>
+                        {formatBalance(customerBalance)}
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-sm font-bold">
+                      <span>After Payment:</span>
+                      <span className={tempBalance < 0 ? "text-red-600" : "text-green-600"}>
+                        {formatBalance(tempBalance)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        )}
 
         {/* Buttons */}
         <div className="flex gap-3">
           <button
-            onClick={addPayment}
-            disabled={!selectedPersonId}
-            className="flex-1 px-6 py-3 bg-gradient-to-r from-blue-600 to-purple-700 text-white rounded-lg hover:from-blue-700 hover:to-purple-800 transition-all font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+            onClick={savePayment}
+            disabled={!selectedPersonId || saving}
+            className="flex-1 px-6 py-3 bg-gradient-to-r from-blue-600 to-purple-700 text-white rounded-lg hover:from-blue-700 hover:to-purple-800 transition-all font-semibold disabled:opacity-50"
           >
-            Record Payment & Print Receipt
+            {saving ? "Saving..." : "💾 Save Payment"}
           </button>
-          {selectedPersonId && amount !== "" && Number(amount) > 0 && (
-            <button
-              onClick={printReceipt}
-              className="px-6 py-3 bg-gradient-to-r from-green-600 to-teal-700 text-white rounded-lg hover:from-green-700 hover:to-teal-800 transition-all font-semibold"
-            >
-              Print Receipt Only
-            </button>
-          )}
+          <button
+            onClick={printReceipt}
+            disabled={!lastSavedPayment}
+            className="px-6 py-3 bg-gradient-to-r from-green-600 to-teal-700 text-white rounded-lg hover:from-green-700 hover:to-teal-800 transition-all font-semibold disabled:opacity-50"
+          >
+            🖨️ Print Receipt
+          </button>
         </div>
+        
+        {lastSavedPayment && (
+          <p className="text-xs text-green-600 mt-3 text-center">
+            ✓ Last payment saved. Click Print Receipt to reprint.
+          </p>
+        )}
       </div>
     </div>
   );

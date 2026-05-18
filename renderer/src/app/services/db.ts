@@ -507,7 +507,121 @@ const deleteFeeList = async (fee: any) => {
     const res = await localDB.find({ selector: { type: "user" } });
     return res.docs;
   };
+// Add to db.ts - Unified balance calculation
+const calculateCustomerBalance = async (personId: string) => {
+  try {
+    const res = await localDB.allDocs({ include_docs: true });
+    const docs = res.rows
+      .map((r: any) => r.doc)
+      .filter((d: any) => d && !d._deleted && d.personId === personId);
 
+    // Get person details
+    const person = docs.find((d: any) => d.type === "person");
+    if (!person) return 0;
+
+    const monthlyFee = Number(person.amount || 0);
+    const connectionDate = new Date(person.createdAt);
+    const currentDate = new Date();
+    
+    // Calculate expected monthly fees from connection date to current month
+    let expectedTotalFees = 0;
+    let feeDate = new Date(connectionDate.getFullYear(), connectionDate.getMonth() + 1, 1);
+    const today = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
+    
+    // Get paid months
+    const paidMonthsSet = new Set();
+    docs
+      .filter((d: any) => d.type === "payment")
+      .forEach((p: any) => {
+        if (p.paymentMonth) paidMonthsSet.add(p.paymentMonth);
+      });
+    
+    while (feeDate <= today) {
+      const monthStr = feeDate.toISOString().slice(0, 7);
+      if (!paidMonthsSet.has(monthStr)) {
+        expectedTotalFees += monthlyFee;
+      }
+      feeDate.setMonth(feeDate.getMonth() + 1);
+    }
+
+    // Calculate all transactions
+    const totalPurchases = docs
+      .filter((d: any) => d.type === "customer-debit")
+      .reduce((sum: number, d: any) => sum + Number(d.amount || 0), 0);
+
+    const totalConcessions = docs
+      .filter((d: any) => d.type === "credit-note")
+      .reduce((sum: number, d: any) => sum + Number(d.amount || 0), 0);
+
+    const totalPayments = docs
+      .filter((d: any) => d.type === "payment")
+      .reduce((sum: number, d: any) => sum + Number(d.amount || 0), 0);
+      
+    const totalDebitPayments = docs
+      .filter((d: any) => d.type === "debit-payment")
+      .reduce((sum: number, d: any) => sum + Number(d.amount || 0), 0);
+
+    // Balance Formula: (Payments + Concessions) - (Fees + Purchases)
+    const totalCredit = totalPayments + totalDebitPayments + totalConcessions;
+    const totalDebit = expectedTotalFees + totalPurchases;
+    const balance = totalCredit - totalDebit;
+    
+    return balance;
+  } catch (e) {
+    console.error("Failed to calculate balance", e);
+    return 0;
+  }
+};
+
+const getPendingMonths = async (personId: string) => {
+  try {
+    const res = await localDB.allDocs({ include_docs: true });
+    const docs = res.rows
+      .map((r: any) => r.doc)
+      .filter((d: any) => d && !d._deleted && d.personId === personId);
+
+    const person = docs.find((d: any) => d.type === "person");
+    if (!person) return [];
+
+    const monthlyFee = Number(person.amount || 0);
+    const connectionDate = new Date(person.createdAt);
+    const currentDate = new Date();
+    
+    const paidMonthsSet = new Set();
+    docs
+      .filter((d: any) => d.type === "payment")
+      .forEach((p: any) => {
+        if (p.paymentMonth) paidMonthsSet.add(p.paymentMonth);
+      });
+    
+    const pending = [];
+    let feeDate = new Date(connectionDate.getFullYear(), connectionDate.getMonth() + 1, 1);
+    const today = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
+    
+    while (feeDate <= today) {
+      const monthStr = feeDate.toISOString().slice(0, 7);
+      if (!paidMonthsSet.has(monthStr)) {
+        pending.push({
+          month: monthStr,
+          monthName: feeDate.toLocaleString('default', { month: 'long', year: 'numeric' }),
+          amount: monthlyFee,
+        });
+      }
+      feeDate.setMonth(feeDate.getMonth() + 1);
+    }
+    
+    return pending;
+  } catch (e) {
+    console.error("Failed to get pending months", e);
+    return [];
+  }
+};
+
+// Add to return statement at the end of db.ts
+ 
+  // ... existing returns ...
+  
+ 
   return {
     localDB,
     remoteDB,
@@ -543,5 +657,7 @@ const deleteFeeList = async (fee: any) => {
 getFeeList,
 updateFeeList,
 deleteFeeList,
+calculateCustomerBalance,
+  getPendingMonths,
   };
 };

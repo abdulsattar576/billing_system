@@ -12,16 +12,17 @@ export default function ReportMenuPage() {
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [transactions, setTransactions] = useState<any[]>([]);
+  const [monthlyStatus, setMonthlyStatus] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [connectionQuery, setConnectionQuery] = useState("");
   const [connectionSuggestions, setConnectionSuggestions] = useState<any[]>([]);
+  const [customerBalance, setCustomerBalance] = useState(0);
+  const [pendingMonths, setPendingMonths] = useState<any[]>([]);
 
-  // Helper: Get all months between two dates
   const getMonthsInRange = (startDate: Date, endDate: Date) => {
     const months = [];
     const start = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
     const end = new Date(endDate.getFullYear(), endDate.getMonth(), 1);
-
     let current = new Date(start);
     while (current <= end) {
       months.push(new Date(current));
@@ -55,8 +56,11 @@ export default function ReportMenuPage() {
     setConnectionQuery("");
     setConnectionSuggestions([]);
     setTransactions([]);
+    setMonthlyStatus([]);
     setFromDate("");
     setToDate("");
+    setCustomerBalance(0);
+    setPendingMonths([]);
   };
 
   const onPersonSelect = (person: any) => {
@@ -64,6 +68,33 @@ export default function ReportMenuPage() {
     setSelectedPerson(person);
     setConnectionQuery(String(person.connectionNumber ?? ""));
     setConnectionSuggestions([]);
+  };
+
+  const onConnectionQueryChange = (q: string) => {
+    setConnectionQuery(q);
+    setSelectedPersonId("");
+    setSelectedPerson(null);
+    setTransactions([]);
+
+    if (!q.trim()) {
+      setConnectionSuggestions([]);
+      return;
+    }
+
+    const qLower = q.toLowerCase();
+    const personsList = selectedArea
+      ? allPersons.filter((p) => p.areaId === selectedArea)
+      : allPersons;
+
+    const filtered = personsList
+      .filter((p) => {
+        const conn = String(p.connectionNumber ?? "").toLowerCase();
+        const name = String(p.name ?? "").toLowerCase();
+        return conn.includes(qLower) || name.includes(qLower);
+      })
+      .slice(0, 20);
+
+    setConnectionSuggestions(filtered);
   };
 
   const loadStatement = async () => {
@@ -86,8 +117,6 @@ export default function ReportMenuPage() {
     try {
       const monthlyFee = Number(selectedPerson?.amount || 0);
       const connectionDate = new Date(selectedPerson?.createdAt);
-
-      // Calculate first fee month (month AFTER connection)
       const firstFeeMonth = new Date(
         connectionDate.getFullYear(),
         connectionDate.getMonth() + 1,
@@ -96,11 +125,8 @@ export default function ReportMenuPage() {
 
       const startDate = new Date(fromDate);
       const endDate = new Date(toDate);
-
-      // Get all months in the selected range that should have fees
       const monthsInRange = getMonthsInRange(startDate, endDate);
 
-      // Get real transactions from database
       const res = await db.localDB.allDocs({ include_docs: true });
       const docs = res.rows
         .map((r: any) => r.doc)
@@ -108,75 +134,173 @@ export default function ReportMenuPage() {
           (d: any) => d && !d._deleted && d.personId === selectedPersonId,
         );
 
-      // Prepare all transactions
+      // Get payments by month
+      const paymentsByMonth = new Map();
+      docs
+        .filter((d: any) => d.type === "payment" && d.paymentMonth)
+        .forEach((p: any) => {
+          const existing = paymentsByMonth.get(p.paymentMonth) || 0;
+          paymentsByMonth.set(p.paymentMonth, existing + Number(p.amount || 0));
+        });
+
+      // Get debit payments
+      const debitPayments = docs
+        .filter((d: any) => d.type === "debit-payment")
+        .map((d: any) => ({
+          id: d._id,
+          date: d.createdAt,
+          description: d.description || "Debit Payment",
+          amount: Number(d.amount || 0),
+        }));
+
+      // Get purchases (Udhari)
+      const purchases = docs
+        .filter((d: any) => d.type === "customer-debit")
+        .map((d: any) => ({
+          id: d._id,
+          date: d.date || d.createdAt,
+          description: d.description,
+          amount: Number(d.amount || 0),
+        }));
+
+      // Get concessions
+      const concessions = docs
+        .filter((d: any) => d.type === "credit-note")
+        .map((d: any) => ({
+          id: d._id,
+          date: d.date || d.createdAt,
+          description: d.description,
+          amount: Number(d.amount || 0),
+        }));
+
+      // Get other payments
+      const otherPayments = docs
+        .filter((d: any) => d.type === "payment" && !d.paymentMonth)
+        .map((d: any) => ({
+          id: d._id,
+          date: d.createdAt,
+          description: d.description || "Cash Received",
+          amount: Number(d.amount || 0),
+        }));
+
       const allTransactions: any[] = [];
+      const monthlyFeeStatus = [];
+      let runningBalance = 0;
 
-      // 1. Add VIRTUAL monthly fees (calculated on the fly)
+      // Track paid months for status
+      const paidMonthsSet = new Set();
+      paymentsByMonth.forEach((_, month) => paidMonthsSet.add(month));
+
       for (const monthDate of monthsInRange) {
-        // Only add fee if month is on or after the first fee month
+        const monthStr = monthDate.toISOString().slice(0, 7);
+        const monthName = monthDate.toLocaleString("default", {
+          month: "long",
+          year: "numeric",
+        });
+        
         if (monthDate >= firstFeeMonth) {
-          const monthStr = monthDate.toISOString().slice(0, 7);
-          const monthName = monthDate.toLocaleString("default", {
-            month: "long",
-            year: "numeric",
-          });
-
-          allTransactions.push({
-            id: `virtual_fee_${monthStr}`,
-            date: monthDate.toISOString(),
-            description: `Monthly Fee - ${monthName}`,
-            debit: monthlyFee,
-            credit: 0,
-            type: "fee",
-            isVirtual: true,
+          const paidAmount = paymentsByMonth.get(monthStr) || 0;
+          const isPaid = paidAmount >= monthlyFee;
+          
+          // Monthly Fee Deduction
+          if (monthDate <= new Date()) {
+            allTransactions.push({
+              id: `fee_${monthStr}`,
+              date: monthDate.toISOString(),
+              description: `${monthName} - Monthly Fee`,
+              amountChange: -monthlyFee,
+              type: "fee",
+            });
+            runningBalance -= monthlyFee;
+          }
+          
+          // Cash Received for this month
+          if (paidAmount > 0) {
+            allTransactions.push({
+              id: `payment_${monthStr}`,
+              date: monthDate.toISOString(),
+              description: `${monthName} - Cash Received`,
+              amountChange: paidAmount,
+              type: "payment",
+            });
+            runningBalance += paidAmount;
+          }
+          
+          monthlyFeeStatus.push({
+            month: monthStr,
+            monthName: monthName,
+            fee: monthlyFee,
+            deducted: monthDate <= new Date() ? monthlyFee : 0,
+            paid: paidAmount,
+            netChange: paidAmount - (monthDate <= new Date() ? monthlyFee : 0),
+            status: isPaid ? "Paid" : paidAmount > 0 ? "Partial" : "Unpaid",
           });
         }
-      }
-
-      // 2. Add customer purchases (from DebitAddPage)
-      docs
-        .filter((d: any) => d.type === "customer-debit")
-        .forEach((d: any) => {
+        
+        // Add purchases
+        const monthPurchases = purchases.filter(p => {
+          const pDate = new Date(p.date);
+          return pDate.getFullYear() === monthDate.getFullYear() && 
+                 pDate.getMonth() === monthDate.getMonth();
+        });
+        monthPurchases.forEach(p => {
           allTransactions.push({
-            id: d._id,
-            date: d.date || d.createdAt,
-            description: d.description,
-            debit: Number(d.amount || 0),
-            credit: 0,
+            id: p.id,
+            date: p.date,
+            description: `Purchase (Udhari): ${p.description}`,
+            amountChange: -p.amount,
             type: "purchase",
-            isVirtual: false,
           });
+          runningBalance -= p.amount;
         });
-
-      // 3. Add payments received (from CashReceivedPage)
-      docs
-        .filter((d: any) => d.type === "payment")
-        .forEach((d: any) => {
-          allTransactions.push({
-            id: d._id,
-            date: d.createdAt,
-            description: d.description || "Payment Received",
-            debit: 0,
-            credit: Number(d.amount || 0),
-            type: "payment",
-            isVirtual: false,
-          });
+        
+        // Add concessions
+        const monthConcessions = concessions.filter(c => {
+          const cDate = new Date(c.date);
+          return cDate.getFullYear() === monthDate.getFullYear() && 
+                 cDate.getMonth() === monthDate.getMonth();
         });
-
-      // 4. Add concessions (from CreditNotePage)
-      docs
-        .filter((d: any) => d.type === "credit-note")
-        .forEach((d: any) => {
+        monthConcessions.forEach(c => {
           allTransactions.push({
-            id: d._id,
-            date: d.date || d.createdAt,
-            description: d.description,
-            debit: 0,
-            credit: Number(d.amount || 0),
+            id: c.id,
+            date: c.date,
+            description: `Concession: ${c.description}`,
+            amountChange: c.amount,
             type: "concession",
-            isVirtual: false,
           });
+          runningBalance += c.amount;
         });
+      }
+      
+      // Add debit payments
+      debitPayments.forEach(dp => {
+        const dpDate = new Date(dp.date);
+        if (dpDate >= startDate && dpDate <= endDate) {
+          allTransactions.push({
+            id: dp.id,
+            date: dp.date,
+            description: `Debit Payment: ${dp.description}`,
+            amountChange: dp.amount,
+            type: "debit_payment",
+          });
+          runningBalance += dp.amount;
+        }
+      });
+      
+      // Add other payments
+      otherPayments.forEach(p => {
+        const pDate = new Date(p.date);
+        if (pDate >= startDate && pDate <= endDate) {
+          allTransactions.push({
+            id: p.id,
+            date: p.date,
+            description: p.description,
+            amountChange: p.amount,
+            type: "payment",
+          });
+          runningBalance += p.amount;
+        }
+      });
 
       // Sort by date
       allTransactions.sort(
@@ -184,20 +308,36 @@ export default function ReportMenuPage() {
       );
 
       // Calculate running balance
-      let runningBalance = 0;
+      let balance = 0;
       const transactionsWithBalance = allTransactions.map((t) => {
-        if (t.debit > 0) {
-          runningBalance += t.debit;
-        } else if (t.credit > 0) {
-          runningBalance -= t.credit;
-        }
+        balance += t.amountChange;
         return {
           ...t,
-          balance: runningBalance,
+          balance: balance,
         };
       });
 
       setTransactions(transactionsWithBalance);
+      setMonthlyStatus(monthlyFeeStatus);
+      setCustomerBalance(runningBalance);
+      
+      // Get pending months for display
+      const pending = [];
+      let feeDate = new Date(connectionDate.getFullYear(), connectionDate.getMonth() + 1, 1);
+      const today = new Date();
+      while (feeDate <= today) {
+        const monthStr = feeDate.toISOString().slice(0, 7);
+        if (!paidMonthsSet.has(monthStr)) {
+          pending.push({
+            month: monthStr,
+            monthName: feeDate.toLocaleString('default', { month: 'long', year: 'numeric' }),
+            amount: monthlyFee,
+          });
+        }
+        feeDate.setMonth(feeDate.getMonth() + 1);
+      }
+      setPendingMonths(pending);
+      
     } catch (e: any) {
       console.error("Failed to load transactions", e);
       alert("Failed to load statement: " + e.message);
@@ -206,13 +346,17 @@ export default function ReportMenuPage() {
     }
   };
 
+  const formatBalance = (balance: number) => {
+    if (balance === 0) return "Rs. 0";
+    if (balance < 0) return `-Rs. ${Math.abs(balance).toFixed(2)}`;
+    return `Rs. ${balance.toFixed(2)}`;
+  };
+
   const printStatement = () => {
     const printWindow = window.open("", "", "width=1200,height=600");
     if (!printWindow) return;
 
-    const totalDebit = transactions.reduce((sum, t) => sum + t.debit, 0);
-    const totalCredit = transactions.reduce((sum, t) => sum + t.credit, 0);
-    const closingBalance = totalDebit - totalCredit;
+    const finalBalance = customerBalance;
 
     printWindow.document.write(`
       <!DOCTYPE html>
@@ -221,21 +365,16 @@ export default function ReportMenuPage() {
         <title>Customer Statement - ${selectedPerson?.name || ""}</title>
         <style>
           * { margin: 0; padding: 0; }
-          body { font-family: Arial, sans-serif; padding: 20px; }
-          h1 { text-align: center; margin-bottom: 10px; font-size: 24px; }
-          h2 { text-align: center; margin-bottom: 20px; font-size: 16px; color: #666; }
-          .customer-info { margin-bottom: 20px; padding: 10px; background: #f3f4f6; border-radius: 8px; }
+          body { font-family: Arial, sans-serif; padding: 20px; font-size: 12px; }
+          h1 { text-align: center; margin-bottom: 10px; font-size: 22px; }
+          h2 { text-align: center; margin-bottom: 20px; font-size: 14px; color: #333; }
+          .customer-info { margin-bottom: 20px; padding: 10px; background: #f5f5f5; border: 1px solid #ddd; }
           .customer-info p { margin: 5px 0; }
           table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-          thead { background-color: #f3f4f6; }
-          th { padding: 12px; text-align: left; font-weight: bold; border-bottom: 2px solid #d1d5db; }
-          td { padding: 10px 12px; border-bottom: 1px solid #e5e7eb; }
+          th { padding: 10px; text-align: left; font-weight: bold; border-bottom: 2px solid #000; background: #f0f0f0; }
+          td { padding: 8px 10px; border-bottom: 1px solid #ddd; }
           .amount { text-align: right; }
-          .debit { color: #dc2626; }
-          .credit { color: #16a34a; }
-          .virtual { color: #6b7280; font-style: italic; }
-          .total-row { background-color: #f3f4f6; font-weight: bold; }
-          .footer { margin-top: 30px; text-align: right; font-weight: bold; }
+          .footer { margin-top: 30px; text-align: right; font-weight: bold; padding-top: 15px; border-top: 2px solid #000; }
         </style>
       </head>
       <body>
@@ -246,16 +385,15 @@ export default function ReportMenuPage() {
           <p><strong>Connection #:</strong> ${selectedPerson?.connectionNumber || "-"}</p>
           <p><strong>Address:</strong> ${selectedPerson?.address || "-"}</p>
           <p><strong>Monthly Fee:</strong> Rs.${Number(selectedPerson?.amount || 0).toFixed(2)}</p>
-          <p><strong>Connection Date:</strong> ${new Date(selectedPerson?.createdAt).toLocaleDateString()}</p>
-          <p><strong>Period:</strong> ${fromDate} to ${toDate}</p>
+          <p><strong>Period:</strong> ${new Date(fromDate).toLocaleDateString()} to ${new Date(toDate).toLocaleDateString()}</p>
         </div>
         <table>
           <thead>
             <tr>
               <th>Date</th>
               <th>Description</th>
-              <th class="amount">Debit</th>
-              <th class="amount">Credit</th>
+              <th class="amount">Debit (-)</th>
+              <th class="amount">Credit (+)</th>
               <th class="amount">Balance</th>
             </tr>
           </thead>
@@ -265,25 +403,19 @@ export default function ReportMenuPage() {
                 (t) => `
               <tr>
                 <td>${new Date(t.date).toLocaleDateString()}</td>
-                <td class="${t.isVirtual ? "virtual" : ""}">${t.description || "-"}${t.isVirtual ? " (Auto)" : ""}</td>
-                <td class="amount debit">${t.debit > 0 ? `Rs.${t.debit.toFixed(2)}` : "-"}</td>
-                <td class="amount credit">${t.credit > 0 ? `Rs.${t.credit.toFixed(2)}` : "-"}</td>
-                <td class="amount">Rs.${t.balance.toFixed(2)}</td>
+                <td>${t.description}</td>
+                <td class="amount">${t.amountChange < 0 ? `Rs. ${Math.abs(t.amountChange).toFixed(2)}` : "-"}</td>
+                <td class="amount">${t.amountChange > 0 ? `Rs. ${t.amountChange.toFixed(2)}` : "-"}</td>
+                <td class="amount">${formatBalance(t.balance)}</td>
               </tr>
             `,
               )
               .join("")}
-            <tr class="total-row">
-              <td colspan="2"><strong>Totals</strong></td>
-              <td class="amount"><strong>Rs.${totalDebit.toFixed(2)}</strong></td>
-              <td class="amount"><strong>Rs.${totalCredit.toFixed(2)}</strong></td>
-              <td class="amount"><strong>Rs.${closingBalance.toFixed(2)}</strong></td>
-            </tr>
           </tbody>
         </table>
         <div class="footer">
-          <p><strong>Outstanding Balance: Rs.${closingBalance.toFixed(2)}</strong></p>
-          ${closingBalance > 0 ? '<p style="color: #dc2626;">⚠ Please clear the outstanding amount</p>' : '<p style="color: #16a34a;">✓ Account is up to date</p>'}
+          <p><strong>Current Balance: ${formatBalance(finalBalance)}</strong></p>
+          ${finalBalance < 0 ? '<p>Customer owes this amount (Udhari)</p>' : finalBalance > 0 ? '<p>Customer has credit balance</p>' : '<p>Balance is zero</p>'}
         </div>
         <script>window.print();</script>
       </body>
@@ -292,9 +424,7 @@ export default function ReportMenuPage() {
     printWindow.document.close();
   };
 
-  const totalDebit = transactions.reduce((sum, t) => sum + t.debit, 0);
-  const totalCredit = transactions.reduce((sum, t) => sum + t.credit, 0);
-  const closingBalance = totalDebit - totalCredit;
+  const finalBalance = customerBalance;
 
   if (loading) {
     return (
@@ -309,17 +439,14 @@ export default function ReportMenuPage() {
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-black">Customer Statement</h1>
         <p className="text-sm text-gray-600">
-          Complete transaction history - Monthly fees calculated based on
-          connection date
+          Positive balance = Customer has credit | Negative balance (-) = Customer owes (Udhari)
         </p>
       </div>
 
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
         {/* Area Selection */}
         <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Area
-          </label>
+          <label className="block text-sm font-medium text-gray-700 mb-2">Area</label>
           <select
             value={selectedArea}
             onChange={(e) => onAreaChange(e.target.value)}
@@ -336,40 +463,13 @@ export default function ReportMenuPage() {
 
         {/* Connection Number */}
         <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Connection Number / Name
-          </label>
+          <label className="block text-sm font-medium text-gray-700 mb-2">Connection Number / Name</label>
           <div className="relative">
             <input
               type="text"
               value={connectionQuery}
-              onChange={(e) => {
-                const q = e.target.value;
-                setConnectionQuery(q);
-                if (!q.trim()) {
-                  setConnectionSuggestions([]);
-                  setSelectedPerson(null);
-                  return;
-                }
-                const filtered = allPersons
-                  .filter((p) => !selectedArea || p.areaId === selectedArea)
-                  .filter(
-                    (p) =>
-                      String(p.connectionNumber || "")
-                        .toLowerCase()
-                        .includes(q.toLowerCase()) ||
-                      String(p.name || "")
-                        .toLowerCase()
-                        .includes(q.toLowerCase()),
-                  )
-                  .slice(0, 20);
-                setConnectionSuggestions(filtered);
-              }}
-              placeholder={
-                selectedArea
-                  ? "Type connection # or name..."
-                  : "Select area first"
-              }
+              onChange={(e) => onConnectionQueryChange(e.target.value)}
+              placeholder={selectedArea ? "Type connection # or name..." : "Select area first"}
               disabled={!selectedArea}
               className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black disabled:bg-gray-50"
             />
@@ -381,12 +481,8 @@ export default function ReportMenuPage() {
                     onClick={() => onPersonSelect(p)}
                     className="px-4 py-2 hover:bg-blue-50 cursor-pointer text-sm text-black border-b border-gray-100"
                   >
-                    <div className="font-medium">
-                      Conn #{p.connectionNumber ?? "-"} — {p.name}
-                    </div>
-                    <div className="text-xs text-gray-400">
-                      {p.address || "-"}
-                    </div>
+                    <div className="font-medium">Conn #{p.connectionNumber ?? "-"} — {p.name}</div>
+                    <div className="text-xs text-gray-400">{p.address || "-"}</div>
                   </li>
                 ))}
               </ul>
@@ -398,42 +494,48 @@ export default function ReportMenuPage() {
         {selectedPerson && (
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6 p-4 bg-gray-50 rounded-lg">
             <div>
-              <label className="block text-xs text-gray-500">
-                Customer Name
-              </label>
-              <div className="text-sm font-medium text-black">
-                {selectedPerson.name}
-              </div>
+              <label className="block text-xs text-gray-500">Customer Name</label>
+              <div className="text-sm font-medium text-black">{selectedPerson.name}</div>
             </div>
             <div>
-              <label className="block text-xs text-gray-500">Address</label>
-              <div className="text-sm text-black">
-                {selectedPerson.address || "-"}
-              </div>
+              <label className="block text-xs text-gray-500">Connection Date</label>
+              <div className="text-sm text-black">{new Date(selectedPerson.createdAt).toLocaleDateString()}</div>
             </div>
             <div>
               <label className="block text-xs text-gray-500">Monthly Fee</label>
-              <div className="text-sm font-medium text-black">
-                Rs.{Number(selectedPerson.amount || 0).toFixed(2)}
-              </div>
+              <div className="text-sm font-medium text-black">Rs.{Number(selectedPerson.amount || 0).toFixed(2)}</div>
             </div>
             <div>
-              <label className="block text-xs text-gray-500">
-                Connected From
-              </label>
-              <div className="text-sm text-black">
-                {new Date(selectedPerson.createdAt).toLocaleDateString()}
+              <label className="block text-xs text-gray-500">Current Balance</label>
+              <div className={`text-sm font-bold ${finalBalance < 0 ? "text-red-600" : finalBalance > 0 ? "text-green-600" : "text-gray-600"}`}>
+                {formatBalance(finalBalance)}
               </div>
             </div>
+          </div>
+        )}
+
+        {/* Pending Months Warning */}
+        {pendingMonths.length > 0 && (
+          <div className="mb-6 p-4 bg-red-50 rounded-lg border border-red-200">
+            <h3 className="text-sm font-semibold text-red-800 mb-2">⚠ Pending Monthly Fees (Not Paid Yet)</h3>
+            <div className="space-y-1">
+              {pendingMonths.map((month, idx) => (
+                <div key={idx} className="flex justify-between text-sm">
+                  <span>{month.monthName}</span>
+                  <span className="font-medium text-red-600">Rs. {month.amount.toFixed(2)}</span>
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-red-600 mt-2">
+              ⚠ These months have been deducted but not paid. Pay them first!
+            </p>
           </div>
         )}
 
         {/* Date Range */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              From Date
-            </label>
+            <label className="block text-sm font-medium text-gray-700 mb-2">From Date</label>
             <input
               type="date"
               value={fromDate}
@@ -442,9 +544,7 @@ export default function ReportMenuPage() {
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              To Date
-            </label>
+            <label className="block text-sm font-medium text-gray-700 mb-2">To Date</label>
             <input
               type="date"
               value={toDate}
@@ -459,7 +559,7 @@ export default function ReportMenuPage() {
           <button
             onClick={loadStatement}
             disabled={!selectedPersonId || !fromDate || !toDate}
-            className="flex-1 px-6 py-3 bg-gradient-to-r from-blue-600 to-purple-700 text-white rounded-lg hover:from-blue-700 hover:to-purple-800 transition-all font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex-1 px-6 py-3 bg-gradient-to-r from-blue-600 to-purple-700 text-white rounded-lg hover:from-blue-700 hover:to-purple-800 transition-all font-semibold disabled:opacity-50"
           >
             Load Statement
           </button>
@@ -474,19 +574,57 @@ export default function ReportMenuPage() {
         </div>
       </div>
 
-      {/* Statement Table */}
+      {/* Monthly Fee Status */}
+      {monthlyStatus.length > 0 && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+          <h2 className="text-lg font-semibold text-black mb-4">Monthly Fee Status</h2>
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">Month</th>
+                  <th className="px-4 py-2 text-right text-xs font-medium text-gray-500">Fee</th>
+                  <th className="px-4 py-2 text-right text-xs font-medium text-gray-500">Paid</th>
+                  <th className="px-4 py-2 text-right text-xs font-medium text-gray-500">Remaining</th>
+                  <th className="px-4 py-2 text-center text-xs font-medium text-gray-500">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-200">
+                {monthlyStatus.map((m) => (
+                  <tr key={m.month}>
+                    <td className="px-4 py-2 text-sm text-gray-900">{m.monthName}</td>
+                    <td className="px-4 py-2 text-sm text-right">Rs.{m.fee.toFixed(2)}</td>
+                    <td className="px-4 py-2 text-sm text-right text-green-600">Rs.{m.paid.toFixed(2)}</td>
+                    <td className="px-4 py-2 text-sm text-right text-red-600">Rs.{(m.fee - m.paid).toFixed(2)}</td>
+                    <td className="px-4 py-2 text-center">
+                      <span className={`px-2 py-1 text-xs rounded-full ${
+                        m.status === "Paid" ? "bg-green-100 text-green-800" :
+                        m.status === "Partial" ? "bg-yellow-100 text-yellow-800" :
+                        "bg-red-100 text-red-800"
+                      }`}>
+                        {m.status}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Transaction Table */}
       {transactions.length > 0 && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
           <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
             <h2 className="text-lg font-semibold text-black">
               Transaction History
               <span className="text-sm font-normal text-gray-500 ml-2">
-                ({fromDate} to {toDate})
+                ({new Date(fromDate).toLocaleDateString()} to {new Date(toDate).toLocaleDateString()})
               </span>
             </h2>
             <p className="text-xs text-gray-400 mt-1">
-              * Monthly fees are calculated automatically from connection date.
-              (Auto) indicates calculated fees.
+              Debit (-) = Money taken | Credit (+) = Money added | Negative balance (-) = Customer owes
             </p>
           </div>
 
@@ -494,116 +632,66 @@ export default function ReportMenuPage() {
             <table className="min-w-full divide-y divide-gray-200">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                    Date
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                    Description
-                  </th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">
-                    Debit
-                  </th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">
-                    Credit
-                  </th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">
-                    Balance
-                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Description</th>
+                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Debit (-)</th>
+                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Credit (+)</th>
+                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Balance</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
                 {transactions.map((transaction, idx) => (
-                  <tr
-                    key={transaction.id || idx}
-                    className={`hover:bg-gray-50 ${transaction.isVirtual ? "bg-gray-50/50" : ""}`}
-                  >
+                  <tr key={transaction.id || idx} className="hover:bg-gray-50">
                     <td className="px-6 py-3 text-sm text-gray-900">
                       {new Date(transaction.date).toLocaleDateString()}
                     </td>
-                    <td
-                      className={`px-6 py-3 text-sm ${transaction.isVirtual ? "text-gray-500 italic" : "text-gray-600"}`}
-                    >
-                      {transaction.description || "-"}
-                      {transaction.isVirtual && (
-                        <span className="text-xs text-gray-400 ml-2">
-                          (Auto-calculated)
-                        </span>
-                      )}
+                    <td className="px-6 py-3 text-sm text-gray-600">
+                      {transaction.description}
                     </td>
                     <td className="px-6 py-3 text-sm text-right text-red-600 font-medium">
-                      {transaction.debit > 0
-                        ? `Rs.${transaction.debit.toFixed(2)}`
-                        : "-"}
+                      {transaction.amountChange < 0 ? `Rs. ${Math.abs(transaction.amountChange).toFixed(2)}` : "-"}
                     </td>
                     <td className="px-6 py-3 text-sm text-right text-green-600 font-medium">
-                      {transaction.credit > 0
-                        ? `Rs.${transaction.credit.toFixed(2)}`
-                        : "-"}
+                      {transaction.amountChange > 0 ? `Rs. ${transaction.amountChange.toFixed(2)}` : "-"}
                     </td>
-                    <td className="px-6 py-3 text-sm text-right font-semibold text-gray-900">
-                      Rs.{transaction.balance.toFixed(2)}
+                    <td className="px-6 py-3 text-sm text-right font-semibold">
+                      <span className={transaction.balance < 0 ? "text-red-600" : "text-green-600"}>
+                        {formatBalance(transaction.balance)}
+                      </span>
                     </td>
                   </tr>
                 ))}
               </tbody>
-              <tfoot className="bg-gray-50 border-t-2 border-gray-200">
-                <tr>
-                  <td
-                    colSpan={2}
-                    className="px-6 py-3 text-sm font-bold text-gray-900"
-                  >
-                    Totals
-                  </td>
-                  <td className="px-6 py-3 text-sm text-right font-bold text-red-600">
-                    Rs.{totalDebit.toFixed(2)}
-                  </td>
-                  <td className="px-6 py-3 text-sm text-right font-bold text-green-600">
-                    Rs.{totalCredit.toFixed(2)}
-                  </td>
-                  <td className="px-6 py-3 text-sm text-right font-bold text-blue-600">
-                    Rs.{closingBalance.toFixed(2)}
-                  </td>
-                </tr>
-              </tfoot>
             </table>
           </div>
 
-          {/* Summary */}
+          {/* Current Balance Summary */}
           <div className="px-6 py-4 border-t border-gray-200 bg-gray-50">
-            <div className="flex justify-between items-center">
-              <div>
-                <p className="text-sm text-gray-600">Outstanding Balance</p>
-                <p
-                  className={`text-2xl font-bold ${closingBalance > 0 ? "text-red-600" : "text-green-600"}`}
-                >
-                  Rs.{closingBalance.toFixed(2)}
+            <div className="flex justify-end">
+              <div className="text-right">
+                <p className="text-sm text-gray-500">Current Balance</p>
+                <p className={`text-2xl font-bold ${finalBalance < 0 ? "text-red-600" : finalBalance > 0 ? "text-green-600" : "text-gray-600"}`}>
+                  {formatBalance(finalBalance)}
                 </p>
-              </div>
-              <div className="text-right text-xs text-gray-400">
-                <p>
-                  • Monthly fees calculated from{" "}
-                  {new Date(selectedPerson?.createdAt).toLocaleDateString()}
-                </p>
-                <p>• Only months after connection date are included</p>
-                <p>• Concessions and payments reduce balance</p>
+                {finalBalance < 0 ? (
+                  <p className="text-xs text-red-500 mt-1">⚠ Customer owes this amount (Udhari)</p>
+                ) : finalBalance > 0 ? (
+                  <p className="text-xs text-green-500 mt-1">✓ Customer has credit balance</p>
+                ) : (
+                  <p className="text-xs text-gray-500 mt-1">✓ Balance is zero</p>
+                )}
               </div>
             </div>
           </div>
         </div>
       )}
 
-      {selectedPersonId &&
-        fromDate &&
-        toDate &&
-        transactions.length === 0 &&
-        !loading && (
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center">
-            <div className="text-gray-400 text-4xl mb-3">📋</div>
-            <div className="text-gray-500">
-              No transactions found for the selected period
-            </div>
-          </div>
-        )}
+      {selectedPersonId && fromDate && toDate && transactions.length === 0 && !loading && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center">
+          <div className="text-gray-400 text-4xl mb-3">📋</div>
+          <div className="text-gray-500">No transactions found for the selected period</div>
+        </div>
+      )}
     </div>
   );
 }
