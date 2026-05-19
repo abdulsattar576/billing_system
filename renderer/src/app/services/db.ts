@@ -81,111 +81,129 @@ export const initDB = async () => {
   };
 
   // ---------------------------
+  // Helper: Get Latest Version of Documents
+  // ---------------------------
+  const getLatestDocuments = (docs: any[], uniqueKey: string = "_id") => {
+    const latestMap = new Map();
+    
+    for (const doc of docs) {
+      if (!doc || doc._deleted) continue;
+      
+      const key = doc[uniqueKey];
+      const existing = latestMap.get(key);
+      
+      if (!existing) {
+        latestMap.set(key, doc);
+      } else {
+        const existingDate = new Date(existing.updatedAt || existing.createdAt || 0);
+        const newDate = new Date(doc.updatedAt || doc.createdAt || 0);
+        if (newDate > existingDate) {
+          latestMap.set(key, doc);
+        }
+      }
+    }
+    
+    return Array.from(latestMap.values());
+  };
+
+  // ---------------------------
   // PERSON CRUD
   // ---------------------------
-const createPerson = async (
-  name: string,
-  areaId: string,
-  connectionNumber?: string,
-  amount?: number,
-  address?: string,
-  amountPaid: number = 0,
-  remainingBalance?: number,
-  receiptNo?: string,
-  phoneNumber?: string
-) => {
-  if (!name.trim() || !areaId) throw new Error("Invalid input");
+  const createPerson = async (
+    name: string,
+    areaId: string,
+    connectionNumber?: string,
+    amount?: number,
+    address?: string,
+    amountPaid: number = 0,
+    remainingBalance?: number,
+    receiptNo?: string,
+    phoneNumber?: string
+  ) => {
+    if (!name.trim() || !areaId) throw new Error("Invalid input");
 
-  const conn = connectionNumber !== undefined ? String(connectionNumber).trim() : "";
-  if (!conn) throw new Error("Connection number is required for a person");
+    const conn = connectionNumber !== undefined ? String(connectionNumber).trim() : "";
+    if (!conn) throw new Error("Connection number is required for a person");
 
-  const receipt = receiptNo !== undefined ? String(receiptNo).trim() : "";
-  if (!receipt) throw new Error("Receipt number is required for a person");
+    const receipt = receiptNo !== undefined ? String(receiptNo).trim() : "";
+    if (!receipt) throw new Error("Receipt number is required for a person");
 
-  // Check uniqueness ONLY within the same area
-  const allDocs = await localDB.allDocs({ include_docs: true });
-  const duplicateInArea = allDocs.rows
-    .map((row: any) => row.doc)
-    .find(
+    // Get all documents and filter to latest versions for duplicate check
+    const allDocs = await localDB.allDocs({ include_docs: true });
+    const allPersons = allDocs.rows
+      .map((row: any) => row.doc)
+      .filter((doc: any) => doc && !doc._deleted && doc.type === "person");
+    
+    // Get only the latest version of each person for duplicate check
+    const latestPersons = getLatestDocuments(allPersons, "connectionNumber");
+    
+    const duplicateInArea = latestPersons.find(
       (doc: any) =>
-        doc &&
-        !doc._deleted &&
-        doc.type === "person" &&
         doc.areaId === areaId &&
         doc.connectionNumber === conn &&
         doc.status !== "disconnected" &&
         doc.status !== "defaulter"
     );
 
-  if (duplicateInArea) {
-    throw new Error(
-      `Connection number ${conn} is already assigned to "${duplicateInArea.name}" in this area`
-    );
-  }
-
-  const monthlyFeeNum = Number(amount || 0);
-  const paidNum = Number(amountPaid || 0);
-  
-  const doc: any = {
-    _id: `person_${areaId}_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
-    type: "person",
-    name: name.trim(),
-    areaId,
-    connectionNumber: conn,
-    receiptNo: receipt,
-    amount: monthlyFeeNum,
-    address: address?.trim() || "-",
-    amountPaid: paidNum,
-    remainingBalance: Math.abs(monthlyFeeNum),
-    phoneNumber: phoneNumber?.trim() || "",
-    status: "active",
-    createdAt: new Date().toISOString(),
-  };
-
-  // Save the person first
-  const result = await localDB.put(doc);
-  
-  // Create initial debit record for the current month's fee
-  const now = new Date();
-  const currentMonth = now.toISOString().slice(0, 7);
-  const currentMonthName = now.toLocaleString("default", { month: "long", year: "numeric" });
-  
-  // If no existing deduction, create one for current month
-  if (monthlyFeeNum > 0) {
-    await localDB.put({
-      _id: `monthly_fee_${result.id}_${currentMonth}_${Date.now()}`,
-      type: "customer-debit",
-      areaId: areaId,
-      personId: result.id,
-      connectionNumber: conn,
-      personName: name.trim(),
-      personAddress: address?.trim() || "-",
-      receiptNo: receipt,
-      date: now.toISOString().slice(0, 10),
-      amount: monthlyFeeNum,
-      description: `${currentMonthName} - Monthly Fee (Initial)`,
-      isMonthlyFee: true,
-      month: currentMonth,
-      createdAt: now.toISOString(),
-    });
-  }
-  
-  // Dynamically import and call the cron check (avoids circular dependency)
-  setTimeout(async () => {
-    try {
-      const { checkNewConnectionDeduction } = await import("@/lib/cron-setup");
-      await checkNewConnectionDeduction(result.id);
-    } catch (err) {
-      console.error("Failed to trigger new connection deduction:", err);
+    if (duplicateInArea) {
+      throw new Error(
+        `Connection number ${conn} is already assigned to "${duplicateInArea.name}" in this area`
+      );
     }
-  }, 1000);
-  
-  return result;
-};
+
+    const monthlyFeeNum = Number(amount || 0);
+    const paidNum = Number(amountPaid || 0);
+    
+    const doc: any = {
+      _id: `person_${areaId}_${conn}_${Date.now()}`, // Use connection number in ID for uniqueness
+      type: "person",
+      name: name.trim(),
+      areaId,
+      connectionNumber: conn,
+      receiptNo: receipt,
+      amount: monthlyFeeNum,
+      address: address?.trim() || "-",
+      amountPaid: paidNum,
+      remainingBalance: Math.abs(monthlyFeeNum),
+      currentBalance: -monthlyFeeNum, // Initial balance: customer owes monthly fee
+      phoneNumber: phoneNumber?.trim() || "",
+      status: "active",
+      createdAt: new Date().toISOString(),
+    };
+
+    // Save the person first
+    const result = await localDB.put(doc);
+    
+    // Create initial debit record for the current month's fee
+    const now = new Date();
+    const currentMonth = now.toISOString().slice(0, 7);
+    const currentMonthName = now.toLocaleString("default", { month: "long", year: "numeric" });
+    
+    if (monthlyFeeNum > 0) {
+      await localDB.put({
+        _id: `monthly_fee_${result.id}_${currentMonth}_${Date.now()}`,
+        type: "customer-debit",
+        areaId: areaId,
+        personId: result.id,
+        connectionNumber: conn,
+        personName: name.trim(),
+        personAddress: address?.trim() || "-",
+        receiptNo: receipt,
+        date: now.toISOString().slice(0, 10),
+        amount: monthlyFeeNum,
+        description: `${currentMonthName} - Monthly Fee (Initial)`,
+        isMonthlyFee: true,
+        month: currentMonth,
+        createdAt: now.toISOString(),
+      });
+    }
+    
+    return result;
+  };
 
   const getPersonsByArea = async (areaId: string) => {
     const res = await localDB.allDocs({ include_docs: true });
-    return res.rows
+    const allPersons = res.rows
       .map((row: any) => row.doc)
       .filter(
         (doc: any) =>
@@ -195,11 +213,14 @@ const createPerson = async (
           doc.areaId === areaId &&
           doc.status === "active"
       );
+    
+    // Return only the latest version of each person
+    return getLatestDocuments(allPersons, "connectionNumber");
   };
 
   const getDefaulterPersons = async (areaId: string) => {
     const res = await localDB.allDocs({ include_docs: true });
-    return res.rows
+    const allPersons = res.rows
       .map((row: any) => row.doc)
       .filter(
         (doc: any) =>
@@ -209,6 +230,8 @@ const createPerson = async (
           doc.areaId === areaId &&
           doc.status === "defaulter"
       );
+    
+    return getLatestDocuments(allPersons, "connectionNumber");
   };
 
   const updatePerson = async (person: any, updates: any) => {
@@ -223,6 +246,7 @@ const createPerson = async (
         ...person,
         status: "defaulter",
         movedToDefaulterAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       };
       await localDB.put(updatedPerson);
       console.log(`Person ${person._id} moved to defaulter list`);
@@ -255,7 +279,7 @@ const createPerson = async (
 
   const getDisconnectedPersons = async (areaId: string) => {
     const res = await localDB.allDocs({ include_docs: true });
-    return res.rows
+    const allPersons = res.rows
       .map((row: any) => row.doc)
       .filter(
         (doc: any) =>
@@ -265,16 +289,20 @@ const createPerson = async (
           doc.areaId === areaId &&
           doc.status === "disconnected"
       );
+    
+    return getLatestDocuments(allPersons, "connectionNumber");
   };
 
   const getAllDisconnected = async () => {
     const res = await localDB.allDocs({ include_docs: true });
-    return res.rows
+    const allPersons = res.rows
       .map((row: any) => row.doc)
       .filter(
         (doc: any) =>
           doc && !doc._deleted && doc.type === "person" && doc.status === "disconnected"
       );
+    
+    return getLatestDocuments(allPersons, "connectionNumber");
   };
 
   // fee_list
@@ -289,7 +317,6 @@ const createPerson = async (
     return localDB.put(doc);
   };
 
-  // get_feeList
   const getFeeList = async () => {
     const res = await localDB.find({
       selector: { type: "feeList" },
@@ -297,7 +324,6 @@ const createPerson = async (
     return res.docs;
   };
 
-  // update fee list
   const updateFeeList = async (fee: any, updates: any) => {
     if (!fee._id || !fee._rev) throw new Error("_id and _rev required");
     return localDB.put({
@@ -307,7 +333,6 @@ const createPerson = async (
     });
   };
 
-  // delete fee list
   const deleteFeeList = async (fee: any) => {
     return localDB.remove(fee);
   };
@@ -316,17 +341,8 @@ const createPerson = async (
     try {
       if (person.status === "defaulter") {
         await localDB.remove(person);
-
-        const debitsResult = await localDB.find({
-          selector: { type: "debit", personId: person._id },
-        });
-        const debits = debitsResult.docs || [];
-        for (const debit of debits) {
-          await localDB.remove(debit);
-        }
-
-        console.log(`Deleted person ${person._id} and ${debits.length} related debit records`);
-        return { success: true, deletedDebits: debits.length, fullyDeleted: true };
+        console.log(`Deleted person ${person._id}`);
+        return { success: true, fullyDeleted: true };
       } else {
         return await moveTodefalterList(person);
       }
@@ -337,36 +353,48 @@ const createPerson = async (
   };
 
   // ---------------------------
-  // AGGREGATION HELPERS
+  // AGGREGATION HELPERS (WITH LATEST VERSION ONLY)
   // ---------------------------
-// src/app/services/db.ts
-
-const getAllPersons = async () => {
-  const res = await localDB.allDocs({ include_docs: true });
-  return res.rows
-    .map((row: any) => row.doc)
-    .filter(
-      (doc: any) =>
-        doc && 
-        !doc._deleted && 
-        doc.type === "person" && 
-        (doc.status === "active" || doc.status === "defaulter")  // Include defaulters too
-    );
-};
-
-  const getAllDefaulters = async () => {
+  const getAllPersons = async () => {
     const res = await localDB.allDocs({ include_docs: true });
-    return res.rows
+    const allPersons = res.rows
       .map((row: any) => row.doc)
       .filter(
         (doc: any) =>
-          doc && !doc._deleted && doc.type === "person" && doc.status === "defaulter"
+          doc && 
+          !doc._deleted && 
+          doc.type === "person"
       );
+    
+    // Return only the latest version of each person (by connectionNumber within area)
+    const latestMap = new Map();
+    
+    for (const person of allPersons) {
+      const key = `${person.areaId}_${person.connectionNumber}`;
+      const existing = latestMap.get(key);
+      
+      if (!existing) {
+        latestMap.set(key, person);
+      } else {
+        const existingDate = new Date(existing.updatedAt || existing.createdAt || 0);
+        const newDate = new Date(person.updatedAt || person.createdAt || 0);
+        if (newDate > existingDate) {
+          latestMap.set(key, person);
+        }
+      }
+    }
+    
+    return Array.from(latestMap.values());
+  };
+
+  const getAllDefaulters = async () => {
+    const allPersons = await getAllPersons();
+    return allPersons.filter((doc: any) => doc.status === "defaulter");
   };
 
   const totalConnections = async () => {
     const persons = await getAllPersons();
-    return persons.length;
+    return persons.filter((p: any) => p.status === "active").length;
   };
 
   const grandTotalRevenue = async () => {
@@ -553,81 +581,79 @@ const getAllPersons = async () => {
   };
 
   // Balance calculation
- const calculateCustomerBalance = async (personId: string) => {
-  try {
-    const res = await localDB.allDocs({ include_docs: true });
-    const docs = res.rows
-      .map((r: any) => r.doc)
-      .filter((d: any) => d && !d._deleted && d.personId === personId);
+  const calculateCustomerBalance = async (personId: string) => {
+    try {
+      const res = await localDB.allDocs({ include_docs: true });
+      const docs = res.rows
+        .map((r: any) => r.doc)
+        .filter((d: any) => d && !d._deleted && d.personId === personId);
 
-    const person = docs.find((d: any) => d.type === "person");
-    if (!person) return 0;
+      const person = docs.find((d: any) => d.type === "person");
+      if (!person) return 0;
 
-    const monthlyFee = Number(person.amount || 0);
-    const connectionDate = new Date(person.createdAt);
-    const currentDate = new Date();
-    
-    let expectedTotalFees = 0;
-    
-    // FIX: Start fee calculation from the connection date's month
-    // If connection date is after 15th, start from next month
-    // If connection date is on/before 15th, start from current month
-    const connectionDay = connectionDate.getDate();
-    let feeDate;
-    
-    if (connectionDay > 15) {
-      // Start from next month
-      feeDate = new Date(connectionDate.getFullYear(), connectionDate.getMonth() + 1, 1);
-    } else {
-      // Start from current month
-      feeDate = new Date(connectionDate.getFullYear(), connectionDate.getMonth(), 1);
-    }
-    
-    const today = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
-    
-    // Get paid months
-    const paidMonthsSet = new Set();
-    docs
-      .filter((d: any) => d.type === "payment")
-      .forEach((p: any) => {
-        if (p.paymentMonth) paidMonthsSet.add(p.paymentMonth);
-      });
-    
-    while (feeDate <= today) {
-      const monthStr = feeDate.toISOString().slice(0, 7);
-      if (!paidMonthsSet.has(monthStr)) {
-        expectedTotalFees += monthlyFee;
+      // Use stored currentBalance if available
+      if (person.currentBalance !== undefined) {
+        return person.currentBalance;
       }
-      feeDate.setMonth(feeDate.getMonth() + 1);
-    }
 
-    // Also include any existing debit records (like the initial one we created)
-    const totalPurchases = docs
-      .filter((d: any) => d.type === "customer-debit")
-      .reduce((sum: number, d: any) => sum + Number(d.amount || 0), 0);
-
-    const totalConcessions = docs
-      .filter((d: any) => d.type === "credit-note")
-      .reduce((sum: number, d: any) => sum + Number(d.amount || 0), 0);
-
-    const totalPayments = docs
-      .filter((d: any) => d.type === "payment")
-      .reduce((sum: number, d: any) => sum + Number(d.amount || 0), 0);
+      const monthlyFee = Number(person.amount || 0);
+      const connectionDate = new Date(person.createdAt);
+      const currentDate = new Date();
       
-    const totalDebitPayments = docs
-      .filter((d: any) => d.type === "debit-payment")
-      .reduce((sum: number, d: any) => sum + Number(d.amount || 0), 0);
+      let expectedTotalFees = 0;
+      
+      const connectionDay = connectionDate.getDate();
+      let feeDate;
+      
+      if (connectionDay > 15) {
+        feeDate = new Date(connectionDate.getFullYear(), connectionDate.getMonth() + 1, 1);
+      } else {
+        feeDate = new Date(connectionDate.getFullYear(), connectionDate.getMonth(), 1);
+      }
+      
+      const today = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
+      
+      const paidMonthsSet = new Set();
+      docs
+        .filter((d: any) => d.type === "payment")
+        .forEach((p: any) => {
+          if (p.paymentMonth) paidMonthsSet.add(p.paymentMonth);
+        });
+      
+      while (feeDate <= today) {
+        const monthStr = feeDate.toISOString().slice(0, 7);
+        if (!paidMonthsSet.has(monthStr)) {
+          expectedTotalFees += monthlyFee;
+        }
+        feeDate.setMonth(feeDate.getMonth() + 1);
+      }
 
-    const totalCredit = totalPayments + totalDebitPayments + totalConcessions;
-    const totalDebit = expectedTotalFees + totalPurchases;
-    const balance = totalCredit - totalDebit;
-    
-    return balance;
-  } catch (e) {
-    console.error("Failed to calculate balance", e);
-    return 0;
-  }
-};
+      const totalPurchases = docs
+        .filter((d: any) => d.type === "customer-debit")
+        .reduce((sum: number, d: any) => sum + Number(d.amount || 0), 0);
+
+      const totalConcessions = docs
+        .filter((d: any) => d.type === "credit-note")
+        .reduce((sum: number, d: any) => sum + Number(d.amount || 0), 0);
+
+      const totalPayments = docs
+        .filter((d: any) => d.type === "payment")
+        .reduce((sum: number, d: any) => sum + Number(d.amount || 0), 0);
+        
+      const totalDebitPayments = docs
+        .filter((d: any) => d.type === "debit-payment")
+        .reduce((sum: number, d: any) => sum + Number(d.amount || 0), 0);
+
+      const totalCredit = totalPayments + totalDebitPayments + totalConcessions;
+      const totalDebit = expectedTotalFees + totalPurchases;
+      const balance = totalCredit - totalDebit;
+      
+      return balance;
+    } catch (e) {
+      console.error("Failed to calculate balance", e);
+      return 0;
+    }
+  };
 
   const getPendingMonths = async (personId: string) => {
     try {
@@ -673,6 +699,33 @@ const getAllPersons = async () => {
     }
   };
 
+  // Update person's balance
+  const updatePersonBalance = async (personId: string, amountChange: number) => {
+    try {
+      const person = await localDB.get(personId);
+      const newBalance = (person.currentBalance || 0) + amountChange;
+      const updatedPerson = {
+        ...person,
+        currentBalance: newBalance,
+        updatedAt: new Date().toISOString(),
+      };
+      await localDB.put(updatedPerson);
+      return newBalance;
+    } catch (err) {
+      console.error("Failed to update balance:", err);
+      return null;
+    }
+  };
+
+  const getPersonBalance = async (personId: string) => {
+    try {
+      const person = await localDB.get(personId);
+      return person.currentBalance || 0;
+    } catch (err) {
+      return 0;
+    }
+  };
+
   return {
     localDB,
     remoteDB,
@@ -710,5 +763,7 @@ const getAllPersons = async () => {
     deleteFeeList,
     calculateCustomerBalance,
     getPendingMonths,
+    updatePersonBalance,
+    getPersonBalance,
   };
 };

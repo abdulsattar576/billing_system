@@ -425,7 +425,6 @@ const loadStatement = async () => {
         <div className="border border-gray-300 rounded p-12 text-center"><div className="text-gray-400 text-4xl mb-3">📋</div><div className="text-gray-500">No transactions found for the selected period</div></div>
       )}
 
-      <div className="mt-6 pt-4 border-t border-gray-300 text-xs text-gray-400">F1 - Date | F12 Back</div>
-    </div>
+     </div>
   );
 }

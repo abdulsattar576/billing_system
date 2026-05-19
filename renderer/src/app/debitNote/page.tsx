@@ -14,7 +14,8 @@ export default function CashReceivedPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [printing, setPrinting] = useState(false);
-  const [areaTotalBalance, setAreaTotalBalance] = useState(0);
+  const [areaTotalDue, setAreaTotalDue] = useState(0);
+  const [areaTotalCustomers, setAreaTotalCustomers] = useState(0);
   
   // Form fields
   const [receiptNo, setReceiptNo] = useState("");
@@ -55,14 +56,21 @@ export default function CashReceivedPage() {
     }
   };
 
-  // Calculate total balance for all persons in area
-  const calculateAreaTotalBalance = (persons: any[]) => {
-    const total = persons.reduce((sum, person) => {
+  // Calculate area totals (Total Due from all customers in area)
+  const calculateAreaTotals = (persons: any[]) => {
+    let totalDue = 0;
+    let customerCount = persons.length;
+    
+    for (const person of persons) {
       const balance = person.balance || 0;
-      // Only sum what customers owe (negative balances)
-      return sum + (balance < 0 ? Math.abs(balance) : 0);
-    }, 0);
-    return total;
+      // If balance is negative, customer owes money
+      if (balance < 0) {
+        totalDue += Math.abs(balance);
+      }
+      // If balance is positive, customer has credit (overpaid) - not counted in due
+    }
+    
+    return { totalDue, customerCount };
   };
 
   // Get area name by ID
@@ -82,7 +90,11 @@ export default function CashReceivedPage() {
       }))
     );
     setDisplayPersons(personsWithBalance);
-    setAreaTotalBalance(calculateAreaTotalBalance(personsWithBalance));
+    
+    const totals = calculateAreaTotals(personsWithBalance);
+    setAreaTotalDue(totals.totalDue);
+    setAreaTotalCustomers(totals.customerCount);
+    
     setSelectedPerson(null);
     setTransactions([]);
     setReceiptNo("");
@@ -110,7 +122,7 @@ export default function CashReceivedPage() {
     return new Date();
   };
 
-  // Load transactions for a person - DESCENDING ORDER (newest first)
+  // Load transactions for a person - CHRONOLOGICAL ORDER (oldest first)
   const loadTransactions = async (personId: string) => {
     if (!db) return;
     try {
@@ -119,23 +131,17 @@ export default function CashReceivedPage() {
         .map((r: any) => r.doc)
         .filter((d: any) => d && !d._deleted && d.personId === personId);
       
-      const sortedDocs = docs.sort((a: any, b: any) => {
-        const dateA = getValidDate(a).getTime();
-        const dateB = getValidDate(b).getTime();
-        return dateB - dateA;
-      });
-      
-      const oldestToNewest = [...docs].sort((a: any, b: any) => {
+      const chronologicalDocs = docs.sort((a: any, b: any) => {
         const dateA = getValidDate(a).getTime();
         const dateB = getValidDate(b).getTime();
         return dateA - dateB;
       });
       
       let runningBalance = 0;
-      const balanceMap = new Map();
-      
-      for (const doc of oldestToNewest) {
+      const transactionsWithBalance = chronologicalDocs.map((doc: any) => {
+        const validDate = getValidDate(doc);
         let amountChange = 0;
+        
         if (doc.type === "payment" || doc.type === "debit-payment") {
           amountChange = Number(doc.amount || 0);
         } else if (doc.type === "customer-debit") {
@@ -143,15 +149,8 @@ export default function CashReceivedPage() {
         } else if (doc.type === "credit-note") {
           amountChange = Number(doc.amount || 0);
         }
+        
         runningBalance += amountChange;
-        balanceMap.set(doc._id, runningBalance);
-      }
-      
-      const transactionsWithBalance = sortedDocs.map((doc: any) => {
-        const validDate = getValidDate(doc);
-        const amountChange = (doc.type === "payment" || doc.type === "debit-payment") ? Number(doc.amount || 0) : 
-                             (doc.type === "customer-debit") ? -Number(doc.amount || 0) : 
-                             (doc.type === "credit-note") ? Number(doc.amount || 0) : 0;
         
         return {
           _id: doc._id,
@@ -162,7 +161,7 @@ export default function CashReceivedPage() {
           amount: Number(doc.amount || 0),
           type: doc.type,
           amountChange: amountChange,
-          runningBalance: balanceMap.get(doc._id) || 0,
+          runningBalance: runningBalance,
           createdAt: doc.createdAt,
         };
       });
@@ -185,14 +184,20 @@ export default function CashReceivedPage() {
     
     if (person) {
       const balance = await calculatePersonBalance(person._id);
-      setDisplayPersons([{ ...person, balance }]);
-      setAreaTotalBalance(calculateAreaTotalBalance([{ ...person, balance }]));
+      const personsWithBalance = [{ ...person, balance }];
+      setDisplayPersons(personsWithBalance);
+      
+      const totals = calculateAreaTotals(personsWithBalance);
+      setAreaTotalDue(totals.totalDue);
+      setAreaTotalCustomers(totals.customerCount);
+      
       setSelectedPerson(person);
       await loadTransactions(person._id);
       setConnectionSuggestions([]);
     } else {
       setDisplayPersons([]);
-      setAreaTotalBalance(0);
+      setAreaTotalDue(0);
+      setAreaTotalCustomers(0);
       setSelectedPerson(null);
       setTransactions([]);
     }
@@ -212,7 +217,8 @@ export default function CashReceivedPage() {
       await loadAreaPersons(areaId);
     } else {
       setDisplayPersons([]);
-      setAreaTotalBalance(0);
+      setAreaTotalDue(0);
+      setAreaTotalCustomers(0);
     }
   };
 
@@ -247,7 +253,8 @@ export default function CashReceivedPage() {
         await loadSinglePerson(q);
       } else {
         setDisplayPersons([]);
-        setAreaTotalBalance(0);
+        setAreaTotalDue(0);
+        setAreaTotalCustomers(0);
         setSelectedPerson(null);
       }
     } else {
@@ -259,7 +266,12 @@ export default function CashReceivedPage() {
     setConnectionQuery(String(person.connectionNumber));
     setSelectedPerson(person);
     setDisplayPersons([person]);
-    setAreaTotalBalance(calculateAreaTotalBalance([person]));
+    
+    const balance = await calculatePersonBalance(person._id);
+    const totals = calculateAreaTotals([{ ...person, balance }]);
+    setAreaTotalDue(totals.totalDue);
+    setAreaTotalCustomers(totals.customerCount);
+    
     setConnectionSuggestions([]);
     setReceiptNo("");
     setCashReceived("");
@@ -308,7 +320,10 @@ export default function CashReceivedPage() {
       const newBalance = await calculatePersonBalance(selectedPerson._id);
       const updatedPerson = { ...selectedPerson, balance: newBalance };
       setDisplayPersons([updatedPerson]);
-      setAreaTotalBalance(calculateAreaTotalBalance([updatedPerson]));
+      
+      const totals = calculateAreaTotals([updatedPerson]);
+      setAreaTotalDue(totals.totalDue);
+      setAreaTotalCustomers(totals.customerCount);
       
       setReceiptNo("");
       setCashReceived("");
@@ -339,7 +354,7 @@ export default function CashReceivedPage() {
 
     const areaName = areas.find((a) => a._id === selectedArea)?.name || "";
     const currentDate = new Date().toLocaleString();
-    const currentBalance = transactions[0]?.runningBalance || 0;
+    const currentBalance = transactions[transactions.length - 1]?.runningBalance || 0;
     
     printWindow.document.write(`
       <!DOCTYPE html>
@@ -457,12 +472,12 @@ export default function CashReceivedPage() {
         <div className="mb-6 p-4 bg-gray-100 border border-gray-300 rounded">
           <div className="flex justify-between items-center">
             <div>
-              <span className="text-sm text-gray-600">Area Total Due:</span>
-              <span className="text-xl font-bold text-black ml-2">Rs. {areaTotalBalance.toFixed(2)}</span>
+              <span className="text-sm text-gray-600">Total Customers:</span>
+              <span className="text-xl font-bold text-black ml-2">{areaTotalCustomers}</span>
             </div>
             <div>
-              <span className="text-sm text-gray-600">Total Customers:</span>
-              <span className="text-xl font-bold text-black ml-2">{displayPersons.length}</span>
+              <span className="text-sm text-gray-600">Total Due from Area:</span>
+              <span className="text-xl font-bold text-red-600 ml-2">Rs. {areaTotalDue.toFixed(2)}</span>
             </div>
           </div>
         </div>
@@ -492,11 +507,10 @@ export default function CashReceivedPage() {
                   <td className="px-3 py-2 text-gray-800">{person.name}</td>
                   <td className="px-3 py-2 text-gray-600">{getAreaName(person.areaId)}</td>
                   <td className="px-3 py-2 text-gray-600 font-mono text-xs">{person.receiptNo || "-"}</td>
-                  <td className={`px-3 py-2 text-right font-mono ${person.balance < 0 ? "text-red-600" : person.balance > 0 ? "text-green-600" : "text-gray-600"}`}>
-                    {person.balance < 0 ? `- Rs. ${Math.abs(person.balance).toFixed(2)}` : 
-                     person.balance > 0 ? `Rs. ${person.balance.toFixed(2)}` : "0.00"}
-                   </td>
-                 </tr>
+                  <td className="px-3 py-2 text-right font-mono text-red-600">
+                    {person.balance < 0 ? `Rs. ${Math.abs(person.balance).toFixed(2)}` : "0.00"}
+                  </td>
+                </tr>
               ))}
             </tbody>
           </table>
@@ -517,54 +531,56 @@ export default function CashReceivedPage() {
 
           <div className="mb-6 border border-gray-300 rounded overflow-hidden">
             <div className="px-3 py-2 bg-gray-100 border-b border-gray-300 text-xs text-gray-500">
-              Showing newest transactions first ↓
+              Transaction History (Oldest to Newest)
             </div>
-            <table className="w-full text-sm">
-              <thead className="bg-gray-100">
-                <tr>
-                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 border-b border-gray-300">Date</th>
-                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 border-b border-gray-300">Receipt No</th>
-                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 border-b border-gray-300">Description</th>
-                  <th className="px-3 py-2 text-right text-xs font-medium text-gray-700 border-b border-gray-300">Amount</th>
-                  <th className="px-3 py-2 text-right text-xs font-medium text-gray-700 border-b border-gray-300">Balance</th>
-                </tr>
-              </thead>
-              <tbody>
-                {transactions.length === 0 ? (
-                  <tr><td colSpan={5} className="px-3 py-8 text-center text-gray-400">No transactions found</td></tr>
-                ) : (
-                  transactions.map((transaction, idx) => {
-                    const isBalanceNegative = transaction.runningBalance < 0;
-                    const isAmountNegative = transaction.amountChange < 0;
-                    return (
-                      <tr key={transaction._id || idx} className="border-b border-gray-200">
-                        <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{transaction.date}</td>
-                        <td className="px-3 py-2 text-gray-600 font-mono text-xs">{transaction.receiptNo}</td>
-                        <td className="px-3 py-2 text-gray-700">{getTransactionType(transaction)}: {transaction.description}</td>
-                        <td className={`px-3 py-2 text-right font-mono whitespace-nowrap ${isAmountNegative ? "text-red-600" : "text-green-600"}`}>
-                          {isAmountNegative ? `- Rs. ${Math.abs(transaction.amountChange).toFixed(2)}` : `+ Rs. ${transaction.amountChange.toFixed(2)}`}
-                        </td>
-                        <td className={`px-3 py-2 text-right font-mono whitespace-nowrap ${isBalanceNegative ? "text-red-600" : "text-green-600"}`}>
-                          {isBalanceNegative ? `- Rs. ${Math.abs(transaction.runningBalance).toFixed(2)}` : `Rs. ${transaction.runningBalance.toFixed(2)}`}
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-              {transactions.length > 0 && (
-                <tfoot className="bg-gray-50 border-t border-gray-300">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-100">
                   <tr>
-                    <td colSpan={4} className="px-3 py-2 text-right font-semibold text-gray-700">Current Balance:</td>
-                    <td className={`px-3 py-2 text-right font-bold ${transactions[0]?.runningBalance < 0 ? "text-red-600" : "text-green-600"}`}>
-                      {transactions[0]?.runningBalance < 0 
-                        ? `- Rs. ${Math.abs(transactions[0]?.runningBalance || 0).toFixed(2)}`
-                        : `Rs. ${(transactions[0]?.runningBalance || 0).toFixed(2)}`}
-                    </td>
+                    <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 border-b border-gray-300">Date</th>
+                    <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 border-b border-gray-300">Receipt No</th>
+                    <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 border-b border-gray-300">Description</th>
+                    <th className="px-3 py-2 text-right text-xs font-medium text-gray-700 border-b border-gray-300">Amount</th>
+                    <th className="px-3 py-2 text-right text-xs font-medium text-gray-700 border-b border-gray-300">Balance</th>
                   </tr>
-                </tfoot>
-              )}
-            </table>
+                </thead>
+                <tbody>
+                  {transactions.length === 0 ? (
+                    <tr><td colSpan={5} className="px-3 py-8 text-center text-gray-400">No transactions found</td></tr>
+                  ) : (
+                    transactions.map((transaction, idx) => {
+                      const isBalanceNegative = transaction.runningBalance < 0;
+                      const isAmountNegative = transaction.amountChange < 0;
+                      return (
+                        <tr key={transaction._id || idx} className="border-b border-gray-200">
+                          <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{transaction.date}</td>
+                          <td className="px-3 py-2 text-gray-600 font-mono text-xs">{transaction.receiptNo}</td>
+                          <td className="px-3 py-2 text-gray-700">{getTransactionType(transaction)}: {transaction.description}</td>
+                          <td className={`px-3 py-2 text-right font-mono whitespace-nowrap ${isAmountNegative ? "text-red-600" : "text-green-600"}`}>
+                            {isAmountNegative ? `- Rs. ${Math.abs(transaction.amountChange).toFixed(2)}` : `+ Rs. ${transaction.amountChange.toFixed(2)}`}
+                          </td>
+                          <td className={`px-3 py-2 text-right font-mono whitespace-nowrap ${isBalanceNegative ? "text-red-600" : "text-green-600"}`}>
+                            {isBalanceNegative ? `- Rs. ${Math.abs(transaction.runningBalance).toFixed(2)}` : `Rs. ${transaction.runningBalance.toFixed(2)}`}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+                {transactions.length > 0 && (
+                  <tfoot className="bg-gray-50 border-t border-gray-300">
+                    <tr>
+                      <td colSpan={4} className="px-3 py-2 text-right font-semibold text-gray-700">Current Balance:</td>
+                      <td className={`px-3 py-2 text-right font-bold ${transactions[transactions.length - 1]?.runningBalance < 0 ? "text-red-600" : "text-green-600"}`}>
+                        {transactions[transactions.length - 1]?.runningBalance < 0 
+                          ? `- Rs. ${Math.abs(transactions[transactions.length - 1]?.runningBalance || 0).toFixed(2)}`
+                          : `Rs. ${(transactions[transactions.length - 1]?.runningBalance || 0).toFixed(2)}`}
+                      </td>
+                    </tr>
+                  </tfoot>
+                )}
+              </table>
+            </div>
           </div>
 
           {/* Payment Form */}
@@ -592,13 +608,19 @@ export default function CashReceivedPage() {
         </>
       )}
 
-      {/* Footer */}
+      {/* Footer - Shows Total Due for Selected Area */}
       <div className="mt-6 pt-4 border-t border-gray-300">
-        <div className="flex justify-between items-center mb-2">
-          <span className="text-sm text-gray-500">Cash Received:</span>
-          <span className="text-lg font-bold text-black">{cashReceived !== "" ? `Rs. ${Number(cashReceived).toFixed(2)}` : "0.00"}</span>
+        <div className="flex justify-between items-center">
+          <div>
+            <span className="text-sm text-gray-500">Total Customers:</span>
+            <span className="text-lg font-bold text-black ml-2">{areaTotalCustomers}</span>
+          </div>
+          <div>
+            <span className="text-sm text-gray-500">Total Cash Receivable:</span>
+            <span className="text-xl font-bold text-red-600 ml-2">Rs. {areaTotalDue.toFixed(2)}</span>
+          </div>
         </div>
-        <div className="flex justify-between text-xs text-gray-400">
+        <div className="flex justify-between text-xs text-gray-400 mt-3 pt-2 border-t border-gray-200">
           <span>F1 - Date</span>
           <span>F12 Back</span>
         </div>
