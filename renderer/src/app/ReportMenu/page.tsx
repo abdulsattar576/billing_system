@@ -12,24 +12,10 @@ export default function ReportMenuPage() {
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [transactions, setTransactions] = useState<any[]>([]);
-  const [monthlyStatus, setMonthlyStatus] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [connectionQuery, setConnectionQuery] = useState("");
   const [connectionSuggestions, setConnectionSuggestions] = useState<any[]>([]);
   const [customerBalance, setCustomerBalance] = useState(0);
-  const [pendingMonths, setPendingMonths] = useState<any[]>([]);
-
-  const getMonthsInRange = (startDate: Date, endDate: Date) => {
-    const months = [];
-    const start = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
-    const end = new Date(endDate.getFullYear(), endDate.getMonth(), 1);
-    let current = new Date(start);
-    while (current <= end) {
-      months.push(new Date(current));
-      current.setMonth(current.getMonth() + 1);
-    }
-    return months;
-  };
 
   useEffect(() => {
     const setup = async () => {
@@ -56,11 +42,9 @@ export default function ReportMenuPage() {
     setConnectionQuery("");
     setConnectionSuggestions([]);
     setTransactions([]);
-    setMonthlyStatus([]);
     setFromDate("");
     setToDate("");
     setCustomerBalance(0);
-    setPendingMonths([]);
   };
 
   const onPersonSelect = (person: any) => {
@@ -97,274 +81,161 @@ export default function ReportMenuPage() {
     setConnectionSuggestions(filtered);
   };
 
-  const loadStatement = async () => {
-    if (!db || !selectedPersonId) {
-      alert("Please select a person");
-      return;
+  // Helper function to get valid date from document
+  const getValidDate = (doc: any): Date => {
+    if (doc.date) {
+      const parsed = new Date(doc.date);
+      if (!isNaN(parsed.getTime())) return parsed;
     }
-
-    if (!fromDate || !toDate) {
-      alert("Please select From Date and To Date");
-      return;
+    if (doc.createdAt) {
+      const parsed = new Date(doc.createdAt);
+      if (!isNaN(parsed.getTime())) return parsed;
     }
-
-    if (fromDate > toDate) {
-      alert("From Date cannot be later than To Date");
-      return;
-    }
-
-    setLoading(true);
-    try {
-      const monthlyFee = Number(selectedPerson?.amount || 0);
-      const connectionDate = new Date(selectedPerson?.createdAt);
-      const firstFeeMonth = new Date(
-        connectionDate.getFullYear(),
-        connectionDate.getMonth() + 1,
-        1,
-      );
-
-      const startDate = new Date(fromDate);
-      const endDate = new Date(toDate);
-      const monthsInRange = getMonthsInRange(startDate, endDate);
-
-      const res = await db.localDB.allDocs({ include_docs: true });
-      const docs = res.rows
-        .map((r: any) => r.doc)
-        .filter(
-          (d: any) => d && !d._deleted && d.personId === selectedPersonId,
-        );
-
-      // Get payments by month
-      const paymentsByMonth = new Map();
-      docs
-        .filter((d: any) => d.type === "payment" && d.paymentMonth)
-        .forEach((p: any) => {
-          const existing = paymentsByMonth.get(p.paymentMonth) || 0;
-          paymentsByMonth.set(p.paymentMonth, existing + Number(p.amount || 0));
-        });
-
-      // Get debit payments
-      const debitPayments = docs
-        .filter((d: any) => d.type === "debit-payment")
-        .map((d: any) => ({
-          id: d._id,
-          date: d.createdAt,
-          description: d.description || "Debit Payment",
-          amount: Number(d.amount || 0),
-        }));
-
-      // Get purchases (Udhari)
-      const purchases = docs
-        .filter((d: any) => d.type === "customer-debit")
-        .map((d: any) => ({
-          id: d._id,
-          date: d.date || d.createdAt,
-          description: d.description,
-          amount: Number(d.amount || 0),
-        }));
-
-      // Get concessions
-      const concessions = docs
-        .filter((d: any) => d.type === "credit-note")
-        .map((d: any) => ({
-          id: d._id,
-          date: d.date || d.createdAt,
-          description: d.description,
-          amount: Number(d.amount || 0),
-        }));
-
-      // Get other payments
-      const otherPayments = docs
-        .filter((d: any) => d.type === "payment" && !d.paymentMonth)
-        .map((d: any) => ({
-          id: d._id,
-          date: d.createdAt,
-          description: d.description || "Cash Received",
-          amount: Number(d.amount || 0),
-        }));
-
-      const allTransactions: any[] = [];
-      const monthlyFeeStatus = [];
-      let runningBalance = 0;
-
-      // Track paid months for status
-      const paidMonthsSet = new Set();
-      paymentsByMonth.forEach((_, month) => paidMonthsSet.add(month));
-
-      for (const monthDate of monthsInRange) {
-        const monthStr = monthDate.toISOString().slice(0, 7);
-        const monthName = monthDate.toLocaleString("default", {
-          month: "long",
-          year: "numeric",
-        });
-        
-        if (monthDate >= firstFeeMonth) {
-          const paidAmount = paymentsByMonth.get(monthStr) || 0;
-          const isPaid = paidAmount >= monthlyFee;
-          
-          // Monthly Fee Deduction
-          if (monthDate <= new Date()) {
-            allTransactions.push({
-              id: `fee_${monthStr}`,
-              date: monthDate.toISOString(),
-              description: `${monthName} - Monthly Fee`,
-              amountChange: -monthlyFee,
-              type: "fee",
-            });
-            runningBalance -= monthlyFee;
-          }
-          
-          // Cash Received for this month
-          if (paidAmount > 0) {
-            allTransactions.push({
-              id: `payment_${monthStr}`,
-              date: monthDate.toISOString(),
-              description: `${monthName} - Cash Received`,
-              amountChange: paidAmount,
-              type: "payment",
-            });
-            runningBalance += paidAmount;
-          }
-          
-          monthlyFeeStatus.push({
-            month: monthStr,
-            monthName: monthName,
-            fee: monthlyFee,
-            deducted: monthDate <= new Date() ? monthlyFee : 0,
-            paid: paidAmount,
-            netChange: paidAmount - (monthDate <= new Date() ? monthlyFee : 0),
-            status: isPaid ? "Paid" : paidAmount > 0 ? "Partial" : "Unpaid",
-          });
-        }
-        
-        // Add purchases
-        const monthPurchases = purchases.filter(p => {
-          const pDate = new Date(p.date);
-          return pDate.getFullYear() === monthDate.getFullYear() && 
-                 pDate.getMonth() === monthDate.getMonth();
-        });
-        monthPurchases.forEach(p => {
-          allTransactions.push({
-            id: p.id,
-            date: p.date,
-            description: `Purchase (Udhari): ${p.description}`,
-            amountChange: -p.amount,
-            type: "purchase",
-          });
-          runningBalance -= p.amount;
-        });
-        
-        // Add concessions
-        const monthConcessions = concessions.filter(c => {
-          const cDate = new Date(c.date);
-          return cDate.getFullYear() === monthDate.getFullYear() && 
-                 cDate.getMonth() === monthDate.getMonth();
-        });
-        monthConcessions.forEach(c => {
-          allTransactions.push({
-            id: c.id,
-            date: c.date,
-            description: `Concession: ${c.description}`,
-            amountChange: c.amount,
-            type: "concession",
-          });
-          runningBalance += c.amount;
-        });
+    if (doc._id) {
+      const match = doc._id.match(/\d{13}/);
+      if (match) {
+        const parsed = new Date(parseInt(match[0]));
+        if (!isNaN(parsed.getTime())) return parsed;
       }
-      
-      // Add debit payments
-      debitPayments.forEach(dp => {
-        const dpDate = new Date(dp.date);
-        if (dpDate >= startDate && dpDate <= endDate) {
-          allTransactions.push({
-            id: dp.id,
-            date: dp.date,
-            description: `Debit Payment: ${dp.description}`,
-            amountChange: dp.amount,
-            type: "debit_payment",
-          });
-          runningBalance += dp.amount;
-        }
-      });
-      
-      // Add other payments
-      otherPayments.forEach(p => {
-        const pDate = new Date(p.date);
-        if (pDate >= startDate && pDate <= endDate) {
-          allTransactions.push({
-            id: p.id,
-            date: p.date,
-            description: p.description,
-            amountChange: p.amount,
-            type: "payment",
-          });
-          runningBalance += p.amount;
-        }
-      });
-
-      // Sort by date
-      allTransactions.sort(
-        (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime(),
-      );
-
-      // Calculate running balance
-      let balance = 0;
-      const transactionsWithBalance = allTransactions.map((t) => {
-        balance += t.amountChange;
-        return {
-          ...t,
-          balance: balance,
-        };
-      });
-
-      setTransactions(transactionsWithBalance);
-      setMonthlyStatus(monthlyFeeStatus);
-      setCustomerBalance(runningBalance);
-      
-      // Get pending months for display
-      const pending = [];
-      let feeDate = new Date(connectionDate.getFullYear(), connectionDate.getMonth() + 1, 1);
-      const today = new Date();
-      while (feeDate <= today) {
-        const monthStr = feeDate.toISOString().slice(0, 7);
-        if (!paidMonthsSet.has(monthStr)) {
-          pending.push({
-            month: monthStr,
-            monthName: feeDate.toLocaleString('default', { month: 'long', year: 'numeric' }),
-            amount: monthlyFee,
-          });
-        }
-        feeDate.setMonth(feeDate.getMonth() + 1);
-      }
-      setPendingMonths(pending);
-      
-    } catch (e: any) {
-      console.error("Failed to load transactions", e);
-      alert("Failed to load statement: " + e.message);
-    } finally {
-      setLoading(false);
     }
+    return new Date();
   };
 
+const loadStatement = async () => {
+  if (!db || !selectedPersonId) {
+    alert("Please select a customer");
+    return;
+  }
+
+  if (!fromDate || !toDate) {
+    alert("Please select From Date and To Date");
+    return;
+  }
+
+  if (fromDate > toDate) {
+    alert("From Date cannot be later than To Date");
+    return;
+  }
+
+  setLoading(true);
+  try {
+    const res = await db.localDB.allDocs({ include_docs: true });
+    
+    // Get ALL transactions for this customer (no date filter yet)
+    const allCustomerDocs = res.rows
+      .map((r: any) => r.doc)
+      .filter(
+        (d: any) => d && !d._deleted && d.personId === selectedPersonId,
+      );
+
+    const startDate = new Date(fromDate);
+    const endDate = new Date(toDate);
+    endDate.setHours(23, 59, 59, 999);
+
+    // ✅ STEP 1: Sort ALL transactions OLDEST to NEWEST (for correct balance calculation)
+    const allOldestToNewest = [...allCustomerDocs].sort((a: any, b: any) => {
+      return getValidDate(a).getTime() - getValidDate(b).getTime();
+    });
+
+    // ✅ STEP 2: Calculate running balance for ALL transactions (oldest to newest)
+    let runningBalance = 0;
+    const balanceMap = new Map();
+    
+    for (const doc of allOldestToNewest) {
+      let amountChange = 0;
+      if (doc.type === "payment" || doc.type === "debit-payment") {
+        amountChange = Number(doc.amount || 0);
+      } else if (doc.type === "customer-debit") {
+        amountChange = -Number(doc.amount || 0);
+      } else if (doc.type === "credit-note") {
+        amountChange = Number(doc.amount || 0);
+      }
+      runningBalance += amountChange;
+      balanceMap.set(doc._id, runningBalance);
+    }
+    
+    // ✅ STEP 3: Filter transactions by date range for DISPLAY only
+    const filteredDocs = allCustomerDocs.filter((doc: any) => {
+      const docDate = getValidDate(doc);
+      return docDate >= startDate && docDate <= endDate;
+    });
+    
+    // ✅ STEP 4: Sort filtered transactions NEWEST to OLDEST for display
+    const newestToOldest = [...filteredDocs].sort((a: any, b: any) => {
+      return getValidDate(b).getTime() - getValidDate(a).getTime();
+    });
+    
+    // ✅ STEP 5: Map transactions with their CORRECT balance (from full history)
+    const transactionsWithBalance = newestToOldest.map((doc: any) => {
+      let amountChange = 0;
+      
+      if (doc.type === "payment" || doc.type === "debit-payment") {
+        amountChange = Number(doc.amount || 0);
+      } else if (doc.type === "customer-debit") {
+        amountChange = -Number(doc.amount || 0);
+      } else if (doc.type === "credit-note") {
+        amountChange = Number(doc.amount || 0);
+      }
+      
+      const validDate = getValidDate(doc);
+      
+      return {
+        _id: doc._id,
+        _rev: doc._rev,
+        date: validDate.toISOString().slice(0, 10),
+        description: doc.description || "-",
+        receiptNo: doc.receiptNo || "-",
+        amount: Number(doc.amount || 0),
+        type: doc.type,
+        amountChange: amountChange,
+        balance: balanceMap.get(doc._id) || 0,  // ✅ Balance from FULL history
+        createdAt: doc.createdAt,
+      };
+    });
+
+    setTransactions(transactionsWithBalance);
+    setCustomerBalance(runningBalance);  // ✅ Final balance after ALL transactions
+    
+  } catch (e: any) {
+    console.error("Failed to load transactions", e);
+    alert("Failed to load statement: " + e.message);
+  } finally {
+    setLoading(false);
+  }
+};
+
   const formatBalance = (balance: number) => {
-    if (balance === 0) return "Rs. 0";
-    if (balance < 0) return `-Rs. ${Math.abs(balance).toFixed(2)}`;
-    return `Rs. ${balance.toFixed(2)}`;
+    if (balance === 0) return "0.00";
+    if (balance < 0) return `${Math.abs(balance).toFixed(2)}`;
+    return `(${balance.toFixed(2)})`;
+  };
+
+  const getTransactionDescription = (doc: any) => {
+    if (doc.type === "payment") return "Cash Received";
+    if (doc.type === "debit-payment") return "Debit Payment";
+    if (doc.type === "customer-debit") {
+      if (doc.isMonthlyFee) return "Monthly Fee";
+      return "Purchase";
+    }
+    if (doc.type === "credit-note") return "Concession";
+    return "-";
   };
 
   const printStatement = () => {
-    const printWindow = window.open("", "", "width=1200,height=600");
+    const printWindow = window.open("", "_blank", "width=1200,height=600");
     if (!printWindow) return;
 
     const finalBalance = customerBalance;
+    const areaName = areas.find((a) => a._id === selectedArea)?.name || "";
 
     printWindow.document.write(`
       <!DOCTYPE html>
       <html>
       <head>
+        <meta charset="UTF-8">
         <title>Customer Statement - ${selectedPerson?.name || ""}</title>
         <style>
-          * { margin: 0; padding: 0; }
+          * { margin: 0; padding: 0; box-sizing: border-box; }
           body { font-family: Arial, sans-serif; padding: 20px; font-size: 12px; }
           h1 { text-align: center; margin-bottom: 10px; font-size: 22px; }
           h2 { text-align: center; margin-bottom: 20px; font-size: 14px; color: #333; }
@@ -375,6 +246,8 @@ export default function ReportMenuPage() {
           td { padding: 8px 10px; border-bottom: 1px solid #ddd; }
           .amount { text-align: right; }
           .footer { margin-top: 30px; text-align: right; font-weight: bold; padding-top: 15px; border-top: 2px solid #000; }
+          .negative { color: #cc0000; }
+          .positive { color: #00aa00; }
         </style>
       </head>
       <body>
@@ -384,6 +257,7 @@ export default function ReportMenuPage() {
           <p><strong>Name:</strong> ${selectedPerson?.name || "-"}</p>
           <p><strong>Connection #:</strong> ${selectedPerson?.connectionNumber || "-"}</p>
           <p><strong>Address:</strong> ${selectedPerson?.address || "-"}</p>
+          <p><strong>Street:</strong> ${areaName}</p>
           <p><strong>Monthly Fee:</strong> Rs.${Number(selectedPerson?.amount || 0).toFixed(2)}</p>
           <p><strong>Period:</strong> ${new Date(fromDate).toLocaleDateString()} to ${new Date(toDate).toLocaleDateString()}</p>
         </div>
@@ -391,9 +265,9 @@ export default function ReportMenuPage() {
           <thead>
             <tr>
               <th>Date</th>
+              <th>Receipt No</th>
               <th>Description</th>
-              <th class="amount">Debit (-)</th>
-              <th class="amount">Credit (+)</th>
+              <th class="amount">Amount</th>
               <th class="amount">Balance</th>
             </tr>
           </thead>
@@ -403,10 +277,14 @@ export default function ReportMenuPage() {
                 (t) => `
               <tr>
                 <td>${new Date(t.date).toLocaleDateString()}</td>
-                <td>${t.description}</td>
-                <td class="amount">${t.amountChange < 0 ? `Rs. ${Math.abs(t.amountChange).toFixed(2)}` : "-"}</td>
-                <td class="amount">${t.amountChange > 0 ? `Rs. ${t.amountChange.toFixed(2)}` : "-"}</td>
-                <td class="amount">${formatBalance(t.balance)}</td>
+                <td>${t.receiptNo}</td>
+                <td>${getTransactionDescription(t)}: ${t.description}</td>
+                <td class="amount ${t.amountChange < 0 ? 'negative' : 'positive'}">
+                  ${t.amountChange < 0 ? `- Rs. ${Math.abs(t.amountChange).toFixed(2)}` : `+ Rs. ${t.amountChange.toFixed(2)}`}
+                </td>
+                <td class="amount ${t.balance < 0 ? 'negative' : 'positive'}">
+                  ${t.balance < 0 ? `- Rs. ${Math.abs(t.balance).toFixed(2)}` : t.balance > 0 ? `Rs. ${t.balance.toFixed(2)}` : "Rs. 0"}
+                </td>
               </tr>
             `,
               )
@@ -414,8 +292,8 @@ export default function ReportMenuPage() {
           </tbody>
         </table>
         <div class="footer">
-          <p><strong>Current Balance: ${formatBalance(finalBalance)}</strong></p>
-          ${finalBalance < 0 ? '<p>Customer owes this amount (Udhari)</p>' : finalBalance > 0 ? '<p>Customer has credit balance</p>' : '<p>Balance is zero</p>'}
+          <p><strong>Current Balance: ${finalBalance < 0 ? `- Rs. ${Math.abs(finalBalance).toFixed(2)}` : finalBalance > 0 ? `Rs. ${finalBalance.toFixed(2)}` : "Rs. 0"}</strong></p>
+          ${finalBalance < 0 ? '<p>Negative balance (-) means customer owes this amount (Udhari)</p>' : finalBalance > 0 ? '<p>Positive balance means customer has credit</p>' : '<p>Balance is zero</p>'}
         </div>
         <script>window.print();</script>
       </body>
@@ -424,35 +302,32 @@ export default function ReportMenuPage() {
     printWindow.document.close();
   };
 
-  const finalBalance = customerBalance;
-
   if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-screen bg-gray-50">
-        <div className="text-lg text-gray-600">Loading...</div>
+      <div className="flex items-center justify-center min-h-screen bg-white">
+        <div className="text-lg text-gray-500">Loading...</div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 p-6">
+    <div className="min-h-screen bg-white p-4">
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-black">Customer Statement</h1>
-        <p className="text-sm text-gray-600">
-          Positive balance = Customer has credit | Negative balance (-) = Customer owes (Udhari)
+        <h1 className="text-xl font-bold text-black">Customer Statement</h1>
+        <p className="text-xs text-gray-500 mt-1">
+          Negative balance (-) = Customer owes | Positive balance = Customer has credit
         </p>
       </div>
 
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
-        {/* Area Selection */}
+      <div className="bg-white border border-gray-300 rounded p-4 mb-6">
         <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 mb-2">Area</label>
+          <label className="block text-sm text-gray-700 mb-1">Street Name:</label>
           <select
             value={selectedArea}
             onChange={(e) => onAreaChange(e.target.value)}
-            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black"
+            className="w-full px-3 py-2 border border-gray-400 rounded bg-white text-black"
           >
-            <option value="">-- Select Area --</option>
+            <option value="">-- Select Street --</option>
             {areas.map((a) => (
               <option key={a._id} value={a._id}>
                 {a.name}
@@ -461,28 +336,26 @@ export default function ReportMenuPage() {
           </select>
         </div>
 
-        {/* Connection Number */}
         <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 mb-2">Connection Number / Name</label>
+          <label className="block text-sm text-gray-700 mb-1">Connection No:</label>
           <div className="relative">
             <input
               type="text"
               value={connectionQuery}
               onChange={(e) => onConnectionQueryChange(e.target.value)}
-              placeholder={selectedArea ? "Type connection # or name..." : "Select area first"}
+              placeholder={selectedArea ? "Type connection number or name" : "Select area first"}
               disabled={!selectedArea}
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black disabled:bg-gray-50"
+              className="w-full px-3 py-2 border border-gray-400 rounded bg-white text-black disabled:bg-gray-100"
             />
             {connectionSuggestions.length > 0 && (
-              <ul className="absolute z-10 left-0 right-0 mt-1 bg-white border border-gray-200 rounded max-h-60 overflow-auto shadow-lg">
+              <ul className="absolute z-10 left-0 right-0 mt-1 bg-white border border-gray-300 rounded shadow-lg max-h-48 overflow-auto">
                 {connectionSuggestions.map((p) => (
                   <li
                     key={p._id}
                     onClick={() => onPersonSelect(p)}
-                    className="px-4 py-2 hover:bg-blue-50 cursor-pointer text-sm text-black border-b border-gray-100"
+                    className="px-3 py-2 hover:bg-gray-100 cursor-pointer border-b border-gray-100"
                   >
-                    <div className="font-medium">Conn #{p.connectionNumber ?? "-"} — {p.name}</div>
-                    <div className="text-xs text-gray-400">{p.address || "-"}</div>
+                    <span className="font-medium">{p.connectionNumber}</span> - {p.name}
                   </li>
                 ))}
               </ul>
@@ -490,208 +363,69 @@ export default function ReportMenuPage() {
           </div>
         </div>
 
-        {/* Customer Details */}
         {selectedPerson && (
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6 p-4 bg-gray-50 rounded-lg">
-            <div>
-              <label className="block text-xs text-gray-500">Customer Name</label>
-              <div className="text-sm font-medium text-black">{selectedPerson.name}</div>
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500">Connection Date</label>
-              <div className="text-sm text-black">{new Date(selectedPerson.createdAt).toLocaleDateString()}</div>
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500">Monthly Fee</label>
-              <div className="text-sm font-medium text-black">Rs.{Number(selectedPerson.amount || 0).toFixed(2)}</div>
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500">Current Balance</label>
-              <div className={`text-sm font-bold ${finalBalance < 0 ? "text-red-600" : finalBalance > 0 ? "text-green-600" : "text-gray-600"}`}>
-                {formatBalance(finalBalance)}
-              </div>
-            </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4 p-3 bg-gray-50 border border-gray-200 rounded">
+            <div><div className="text-xs text-gray-500">Customer Name</div><div className="text-sm font-medium">{selectedPerson.name}</div></div>
+            <div><div className="text-xs text-gray-500">Connection Date</div><div className="text-sm">{new Date(selectedPerson.createdAt).toLocaleDateString()}</div></div>
+            <div><div className="text-xs text-gray-500">Monthly Fee</div><div className="text-sm">Rs.{Number(selectedPerson.amount || 0).toFixed(2)}</div></div>
+            <div><div className="text-xs text-gray-500">Current Balance</div><div className={`text-sm font-bold ${customerBalance < 0 ? "text-red-600" : customerBalance > 0 ? "text-green-600" : "text-gray-600"}`}>
+              {customerBalance < 0 ? `- Rs. ${Math.abs(customerBalance).toFixed(2)}` : customerBalance > 0 ? `Rs. ${customerBalance.toFixed(2)}` : "Rs. 0"}
+            </div></div>
           </div>
         )}
 
-        {/* Pending Months Warning */}
-        {pendingMonths.length > 0 && (
-          <div className="mb-6 p-4 bg-red-50 rounded-lg border border-red-200">
-            <h3 className="text-sm font-semibold text-red-800 mb-2">⚠ Pending Monthly Fees (Not Paid Yet)</h3>
-            <div className="space-y-1">
-              {pendingMonths.map((month, idx) => (
-                <div key={idx} className="flex justify-between text-sm">
-                  <span>{month.monthName}</span>
-                  <span className="font-medium text-red-600">Rs. {month.amount.toFixed(2)}</span>
-                </div>
-              ))}
-            </div>
-            <p className="text-xs text-red-600 mt-2">
-              ⚠ These months have been deducted but not paid. Pay them first!
-            </p>
-          </div>
-        )}
-
-        {/* Date Range */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">From Date</label>
-            <input
-              type="date"
-              value={fromDate}
-              onChange={(e) => setFromDate(e.target.value)}
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">To Date</label>
-            <input
-              type="date"
-              value={toDate}
-              onChange={(e) => setToDate(e.target.value)}
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black"
-            />
-          </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+          <div><label className="block text-sm text-gray-700 mb-1">From Date:</label><input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} className="w-full px-3 py-2 border border-gray-400 rounded bg-white text-black" /></div>
+          <div><label className="block text-sm text-gray-700 mb-1">To Date:</label><input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} className="w-full px-3 py-2 border border-gray-400 rounded bg-white text-black" /></div>
         </div>
 
-        {/* Buttons */}
         <div className="flex gap-3">
-          <button
-            onClick={loadStatement}
-            disabled={!selectedPersonId || !fromDate || !toDate}
-            className="flex-1 px-6 py-3 bg-gradient-to-r from-blue-600 to-purple-700 text-white rounded-lg hover:from-blue-700 hover:to-purple-800 transition-all font-semibold disabled:opacity-50"
-          >
-            Load Statement
-          </button>
-          {transactions.length > 0 && (
-            <button
-              onClick={printStatement}
-              className="px-6 py-3 bg-gradient-to-r from-green-600 to-teal-700 text-white rounded-lg hover:from-green-700 hover:to-teal-800 transition-all font-semibold"
-            >
-              Print
-            </button>
-          )}
+          <button onClick={loadStatement} disabled={!selectedPersonId || !fromDate || !toDate} className="px-6 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50">Load Statement</button>
+          {transactions.length > 0 && <button onClick={printStatement} className="px-6 py-2 bg-green-600 text-white rounded hover:bg-green-700">Print Statement</button>}
+          <button onClick={() => { setSelectedPerson(null); setSelectedPersonId(""); setConnectionQuery(""); setTransactions([]); setFromDate(""); setToDate(""); setCustomerBalance(0); }} className="px-6 py-2 bg-gray-400 text-white rounded hover:bg-gray-500">Clear</button>
         </div>
       </div>
 
-      {/* Monthly Fee Status */}
-      {monthlyStatus.length > 0 && (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
-          <h2 className="text-lg font-semibold text-black mb-4">Monthly Fee Status</h2>
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">Month</th>
-                  <th className="px-4 py-2 text-right text-xs font-medium text-gray-500">Fee</th>
-                  <th className="px-4 py-2 text-right text-xs font-medium text-gray-500">Paid</th>
-                  <th className="px-4 py-2 text-right text-xs font-medium text-gray-500">Remaining</th>
-                  <th className="px-4 py-2 text-center text-xs font-medium text-gray-500">Status</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-200">
-                {monthlyStatus.map((m) => (
-                  <tr key={m.month}>
-                    <td className="px-4 py-2 text-sm text-gray-900">{m.monthName}</td>
-                    <td className="px-4 py-2 text-sm text-right">Rs.{m.fee.toFixed(2)}</td>
-                    <td className="px-4 py-2 text-sm text-right text-green-600">Rs.{m.paid.toFixed(2)}</td>
-                    <td className="px-4 py-2 text-sm text-right text-red-600">Rs.{(m.fee - m.paid).toFixed(2)}</td>
-                    <td className="px-4 py-2 text-center">
-                      <span className={`px-2 py-1 text-xs rounded-full ${
-                        m.status === "Paid" ? "bg-green-100 text-green-800" :
-                        m.status === "Partial" ? "bg-yellow-100 text-yellow-800" :
-                        "bg-red-100 text-red-800"
-                      }`}>
-                        {m.status}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* Transaction Table */}
       {transactions.length > 0 && (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
-            <h2 className="text-lg font-semibold text-black">
-              Transaction History
-              <span className="text-sm font-normal text-gray-500 ml-2">
-                ({new Date(fromDate).toLocaleDateString()} to {new Date(toDate).toLocaleDateString()})
-              </span>
-            </h2>
-            <p className="text-xs text-gray-400 mt-1">
-              Debit (-) = Money taken | Credit (+) = Money added | Negative balance (-) = Customer owes
-            </p>
+        <div className="border border-gray-300 rounded overflow-hidden">
+          <div className="px-4 py-3 bg-gray-100 border-b border-gray-300 flex justify-between items-center">
+            <h2 className="text-sm font-semibold text-black">Transaction History <span className="text-xs font-normal text-gray-500 ml-2">({new Date(fromDate).toLocaleDateString()} to {new Date(toDate).toLocaleDateString()})</span></h2>
+            <span className="text-xs text-gray-500">↓ Newest first</span>
           </div>
-
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
+            <table className="w-full text-sm">
               <thead className="bg-gray-50">
-                <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Description</th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Debit (-)</th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Credit (+)</th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Balance</th>
-                </tr>
+                <tr><th className="px-4 py-2 text-left text-xs font-medium text-gray-600 border-b border-gray-300">Date</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-gray-600 border-b border-gray-300">Receipt No</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-gray-600 border-b border-gray-300">Description</th>
+                <th className="px-4 py-2 text-right text-xs font-medium text-gray-600 border-b border-gray-300">Amount</th>
+                <th className="px-4 py-2 text-right text-xs font-medium text-gray-600 border-b border-gray-300">Balance</th></tr>
               </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
+              <tbody>
                 {transactions.map((transaction, idx) => (
-                  <tr key={transaction.id || idx} className="hover:bg-gray-50">
-                    <td className="px-6 py-3 text-sm text-gray-900">
-                      {new Date(transaction.date).toLocaleDateString()}
-                    </td>
-                    <td className="px-6 py-3 text-sm text-gray-600">
-                      {transaction.description}
-                    </td>
-                    <td className="px-6 py-3 text-sm text-right text-red-600 font-medium">
-                      {transaction.amountChange < 0 ? `Rs. ${Math.abs(transaction.amountChange).toFixed(2)}` : "-"}
-                    </td>
-                    <td className="px-6 py-3 text-sm text-right text-green-600 font-medium">
-                      {transaction.amountChange > 0 ? `Rs. ${transaction.amountChange.toFixed(2)}` : "-"}
-                    </td>
-                    <td className="px-6 py-3 text-sm text-right font-semibold">
-                      <span className={transaction.balance < 0 ? "text-red-600" : "text-green-600"}>
-                        {formatBalance(transaction.balance)}
-                      </span>
-                    </td>
+                  <tr key={transaction._id || idx} className="border-b border-gray-200 hover:bg-gray-50">
+                    <td className="px-4 py-2 text-gray-600 whitespace-nowrap">{transaction.date}</td>
+                    <td className="px-4 py-2 text-gray-600 font-mono text-xs">{transaction.receiptNo}</td>
+                    <td className="px-4 py-2 text-gray-700"><span className="inline-block px-2 py-0.5 rounded text-xs mr-2 bg-gray-100 text-gray-700">{getTransactionDescription(transaction)}</span>{transaction.description}</td>
+                    <td className={`px-4 py-2 text-right font-mono whitespace-nowrap ${transaction.amountChange < 0 ? "text-red-600" : "text-green-600"}`}>{transaction.amountChange < 0 ? `- Rs. ${Math.abs(transaction.amountChange).toFixed(2)}` : `+ Rs. ${transaction.amountChange.toFixed(2)}`}</td>
+                    <td className={`px-4 py-2 text-right font-mono whitespace-nowrap ${transaction.balance < 0 ? "text-red-600" : transaction.balance > 0 ? "text-green-600" : "text-gray-600"}`}>{transaction.balance < 0 ? `- Rs. ${Math.abs(transaction.balance).toFixed(2)}` : transaction.balance > 0 ? `Rs. ${transaction.balance.toFixed(2)}` : "Rs. 0"}</td>
                   </tr>
                 ))}
               </tbody>
+              <tfoot className="bg-gray-50 border-t border-gray-300">
+                <tr><td colSpan={4} className="px-4 py-2 text-right font-semibold text-gray-700">Current Balance:</td>
+                <td className={`px-4 py-2 text-right font-bold ${customerBalance < 0 ? "text-red-600" : customerBalance > 0 ? "text-green-600" : "text-gray-600"}`}>{customerBalance < 0 ? `- Rs. ${Math.abs(customerBalance).toFixed(2)}` : customerBalance > 0 ? `Rs. ${customerBalance.toFixed(2)}` : "Rs. 0"}</td></tr>
+              </tfoot>
             </table>
-          </div>
-
-          {/* Current Balance Summary */}
-          <div className="px-6 py-4 border-t border-gray-200 bg-gray-50">
-            <div className="flex justify-end">
-              <div className="text-right">
-                <p className="text-sm text-gray-500">Current Balance</p>
-                <p className={`text-2xl font-bold ${finalBalance < 0 ? "text-red-600" : finalBalance > 0 ? "text-green-600" : "text-gray-600"}`}>
-                  {formatBalance(finalBalance)}
-                </p>
-                {finalBalance < 0 ? (
-                  <p className="text-xs text-red-500 mt-1">⚠ Customer owes this amount (Udhari)</p>
-                ) : finalBalance > 0 ? (
-                  <p className="text-xs text-green-500 mt-1">✓ Customer has credit balance</p>
-                ) : (
-                  <p className="text-xs text-gray-500 mt-1">✓ Balance is zero</p>
-                )}
-              </div>
-            </div>
           </div>
         </div>
       )}
 
       {selectedPersonId && fromDate && toDate && transactions.length === 0 && !loading && (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center">
-          <div className="text-gray-400 text-4xl mb-3">📋</div>
-          <div className="text-gray-500">No transactions found for the selected period</div>
-        </div>
+        <div className="border border-gray-300 rounded p-12 text-center"><div className="text-gray-400 text-4xl mb-3">📋</div><div className="text-gray-500">No transactions found for the selected period</div></div>
       )}
+
+      <div className="mt-6 pt-4 border-t border-gray-300 text-xs text-gray-400">F1 - Date | F12 Back</div>
     </div>
   );
 }

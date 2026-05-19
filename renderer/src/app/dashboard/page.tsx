@@ -5,7 +5,7 @@ import MetricsCards from "../components/MetricsCards";
 import SearchSection from "../components/SearchSection";
 import DataTable from "../components/DataTable";
 import { initDB } from "../services/db";
-
+ 
 const DashboardPage: React.FC = () => {
   const [metrics, setMetrics] = useState<any[] | undefined>(undefined);
 
@@ -74,6 +74,7 @@ const DashboardPage: React.FC = () => {
       <MetricsCards metrics={metrics} />
       <SearchSection onSearch={handleSearch} />
       <DataTable />
+      
     </>
   );
 };

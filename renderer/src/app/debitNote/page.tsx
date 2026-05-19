@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { initDB } from "../services/db";
 
 export default function CashReceivedPage() {
@@ -7,38 +7,24 @@ export default function CashReceivedPage() {
   const [areas, setAreas] = useState<any[]>([]);
   const [allPersons, setAllPersons] = useState<any[]>([]);
   const [selectedArea, setSelectedArea] = useState("");
-  const [selectedPersonId, setSelectedPersonId] = useState("");
-  const [selectedPerson, setSelectedPerson] = useState<any>(null);
-  const [receiptNo, setReceiptNo] = useState("");
-  const [amount, setAmount] = useState<number | "">("");
-  const [description, setDescription] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [connectionQuery, setConnectionQuery] = useState("");
   const [connectionSuggestions, setConnectionSuggestions] = useState<any[]>([]);
-  const [customerBalance, setCustomerBalance] = useState(0);
-  const [pendingMonths, setPendingMonths] = useState<any[]>([]);
-  const [lastSavedPayment, setLastSavedPayment] = useState<any>(null);
-
-  const receiptRef = useRef<HTMLInputElement>(null);
-  const amountRef = useRef<HTMLInputElement>(null);
-
-  const generateReceiptNo = async () => {
-    if (!db) return "0001";
-    try {
-      const res = await db.localDB.allDocs({ include_docs: true });
-      const payments = res.rows
-        .map((r: any) => r.doc)
-        .filter((d: any) => d && !d._deleted && (d.type === "payment" || d.type === "debit-payment"));
-      const maxReceiptNo = payments.reduce((max: number, p: any) => {
-        const num = parseInt(p.receiptNo, 10);
-        return !isNaN(num) && num > max ? num : max;
-      }, 0);
-      return String(maxReceiptNo + 1).padStart(4, "0");
-    } catch (e) {
-      return "0001";
-    }
-  };
+  const [selectedPerson, setSelectedPerson] = useState<any>(null);
+  const [displayPersons, setDisplayPersons] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [printing, setPrinting] = useState(false);
+  const [areaTotalBalance, setAreaTotalBalance] = useState(0);
+  
+  // Form fields
+  const [receiptNo, setReceiptNo] = useState("");
+  const [cashReceived, setCashReceived] = useState<number | "">("");
+  const [description, setDescription] = useState("");
+  
+  // Transaction history for single customer
+  const [transactions, setTransactions] = useState<any[]>([]);
+  
+  const cashReceivedRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const setup = async () => {
@@ -50,113 +36,329 @@ export default function CashReceivedPage() {
         setAreas(a || []);
         const all = await pouch.getAllPersons();
         setAllPersons(all || []);
-        const nextReceipt = await generateReceiptNo();
-        setReceiptNo(nextReceipt);
       } catch (e) {
-        console.warn("failed to load areas/persons", e);
+        console.warn(e);
       }
       setLoading(false);
     };
     setup();
   }, []);
 
-  // Refresh balance and pending months using db service
-  const refreshCustomerData = async (personId: string) => {
-    if (!db || !personId) return;
+  // Calculate balance for a person
+  const calculatePersonBalance = async (personId: string) => {
+    if (!db) return 0;
     try {
       const balance = await db.calculateCustomerBalance(personId);
-      const pending = await db.getPendingMonths(personId);
-      setCustomerBalance(balance);
-      setPendingMonths(pending);
+      return balance;
     } catch (e) {
-      console.error("Failed to refresh customer data", e);
+      return 0;
     }
   };
 
-  useEffect(() => {
-    if (selectedPersonId) {
-      refreshCustomerData(selectedPersonId);
+  // Calculate total balance for all persons in area
+  const calculateAreaTotalBalance = (persons: any[]) => {
+    const total = persons.reduce((sum, person) => {
+      const balance = person.balance || 0;
+      // Only sum what customers owe (negative balances)
+      return sum + (balance < 0 ? Math.abs(balance) : 0);
+    }, 0);
+    return total;
+  };
+
+  // Get area name by ID
+  const getAreaName = (areaId: string) => {
+    const area = areas.find(a => a._id === areaId);
+    return area ? area.name : "-";
+  };
+
+  // Load all persons in area with balances
+  const loadAreaPersons = async (areaId: string) => {
+    if (!db) return;
+    const persons = allPersons.filter(p => p.areaId === areaId);
+    const personsWithBalance = await Promise.all(
+      persons.map(async (p) => ({
+        ...p,
+        balance: await calculatePersonBalance(p._id)
+      }))
+    );
+    setDisplayPersons(personsWithBalance);
+    setAreaTotalBalance(calculateAreaTotalBalance(personsWithBalance));
+    setSelectedPerson(null);
+    setTransactions([]);
+    setReceiptNo("");
+    setCashReceived("");
+    setDescription("");
+  };
+
+  // Helper function to get valid date from document
+  const getValidDate = (doc: any): Date => {
+    if (doc.date) {
+      const parsed = new Date(doc.date);
+      if (!isNaN(parsed.getTime())) return parsed;
     }
-  }, [db, selectedPersonId]);
+    if (doc.createdAt) {
+      const parsed = new Date(doc.createdAt);
+      if (!isNaN(parsed.getTime())) return parsed;
+    }
+    if (doc._id) {
+      const match = doc._id.match(/\d{13}/);
+      if (match) {
+        const parsed = new Date(parseInt(match[0]));
+        if (!isNaN(parsed.getTime())) return parsed;
+      }
+    }
+    return new Date();
+  };
+
+  // Load transactions for a person - DESCENDING ORDER (newest first)
+  const loadTransactions = async (personId: string) => {
+    if (!db) return;
+    try {
+      const res = await db.localDB.allDocs({ include_docs: true });
+      const docs = res.rows
+        .map((r: any) => r.doc)
+        .filter((d: any) => d && !d._deleted && d.personId === personId);
+      
+      const sortedDocs = docs.sort((a: any, b: any) => {
+        const dateA = getValidDate(a).getTime();
+        const dateB = getValidDate(b).getTime();
+        return dateB - dateA;
+      });
+      
+      const oldestToNewest = [...docs].sort((a: any, b: any) => {
+        const dateA = getValidDate(a).getTime();
+        const dateB = getValidDate(b).getTime();
+        return dateA - dateB;
+      });
+      
+      let runningBalance = 0;
+      const balanceMap = new Map();
+      
+      for (const doc of oldestToNewest) {
+        let amountChange = 0;
+        if (doc.type === "payment" || doc.type === "debit-payment") {
+          amountChange = Number(doc.amount || 0);
+        } else if (doc.type === "customer-debit") {
+          amountChange = -Number(doc.amount || 0);
+        } else if (doc.type === "credit-note") {
+          amountChange = Number(doc.amount || 0);
+        }
+        runningBalance += amountChange;
+        balanceMap.set(doc._id, runningBalance);
+      }
+      
+      const transactionsWithBalance = sortedDocs.map((doc: any) => {
+        const validDate = getValidDate(doc);
+        const amountChange = (doc.type === "payment" || doc.type === "debit-payment") ? Number(doc.amount || 0) : 
+                             (doc.type === "customer-debit") ? -Number(doc.amount || 0) : 
+                             (doc.type === "credit-note") ? Number(doc.amount || 0) : 0;
+        
+        return {
+          _id: doc._id,
+          _rev: doc._rev,
+          date: validDate.toISOString().slice(0, 10),
+          description: doc.description || "-",
+          receiptNo: doc.receiptNo || "-",
+          amount: Number(doc.amount || 0),
+          type: doc.type,
+          amountChange: amountChange,
+          runningBalance: balanceMap.get(doc._id) || 0,
+          createdAt: doc.createdAt,
+        };
+      });
+      
+      setTransactions(transactionsWithBalance);
+    } catch (e) {
+      console.error("Failed to load transactions", e);
+    }
+  };
+
+  // Load single person when connection number is entered
+  const loadSinglePerson = async (query: string) => {
+    if (!db) return;
+    const qLower = query.toLowerCase();
+    const person = allPersons.find(
+      p => p.areaId === selectedArea && 
+      (String(p.connectionNumber).toLowerCase() === qLower || 
+       p.name.toLowerCase() === qLower)
+    );
+    
+    if (person) {
+      const balance = await calculatePersonBalance(person._id);
+      setDisplayPersons([{ ...person, balance }]);
+      setAreaTotalBalance(calculateAreaTotalBalance([{ ...person, balance }]));
+      setSelectedPerson(person);
+      await loadTransactions(person._id);
+      setConnectionSuggestions([]);
+    } else {
+      setDisplayPersons([]);
+      setAreaTotalBalance(0);
+      setSelectedPerson(null);
+      setTransactions([]);
+    }
+  };
 
   const onAreaChange = async (areaId: string) => {
     setSelectedArea(areaId);
-    setSelectedPersonId("");
-    setSelectedPerson(null);
     setConnectionQuery("");
-    setConnectionSuggestions([]);
-    setAmount("");
-    setDescription("");
-    setCustomerBalance(0);
-    setPendingMonths([]);
-    setLastSavedPayment(null);
-    const nextReceipt = await generateReceiptNo();
-    setReceiptNo(nextReceipt);
-  };
-
-  const onPersonSelect = (person: any) => {
-    setSelectedPersonId(person._id);
-    setSelectedPerson(person);
-    setConnectionQuery(String(person.connectionNumber ?? ""));
-    setConnectionSuggestions([]);
-    setLastSavedPayment(null);
-    setTimeout(() => amountRef.current?.focus(), 100);
-  };
-
-  const onConnectionQueryChange = (q: string) => {
-    setConnectionQuery(q);
-    setSelectedPersonId("");
     setSelectedPerson(null);
-    setLastSavedPayment(null);
-    if (!q.trim()) {
+    setReceiptNo("");
+    setCashReceived("");
+    setDescription("");
+    setTransactions([]);
+    setConnectionSuggestions([]);
+    
+    if (areaId) {
+      await loadAreaPersons(areaId);
+    } else {
+      setDisplayPersons([]);
+      setAreaTotalBalance(0);
+    }
+  };
+
+  const onConnectionQueryChange = async (q: string) => {
+    setConnectionQuery(q);
+    setSelectedPerson(null);
+    setReceiptNo("");
+    setCashReceived("");
+    setDescription("");
+    setTransactions([]);
+    
+    if (!q.trim() && selectedArea) {
+      await loadAreaPersons(selectedArea);
       setConnectionSuggestions([]);
       return;
     }
-    const qLower = q.toLowerCase();
-    const personsList = selectedArea
-      ? allPersons.filter((p) => p.areaId === selectedArea)
-      : allPersons;
-    const filtered = personsList
-      .filter((p) => {
-        const conn = String(p.connectionNumber ?? "").toLowerCase();
-        const name = String(p.name ?? "").toLowerCase();
-        return conn.includes(qLower) || name.includes(qLower);
-      })
-      .slice(0, 20);
-    setConnectionSuggestions(filtered);
+    
+    if (q.trim() && selectedArea) {
+      const qLower = q.toLowerCase();
+      const matches = allPersons.filter(
+        p => p.areaId === selectedArea && 
+        (String(p.connectionNumber).toLowerCase().includes(qLower) || 
+         p.name.toLowerCase().includes(qLower))
+      ).slice(0, 10);
+      setConnectionSuggestions(matches);
+      
+      const exactMatch = matches.find(
+        p => String(p.connectionNumber).toLowerCase() === qLower || 
+        p.name.toLowerCase() === qLower
+      );
+      if (exactMatch) {
+        await loadSinglePerson(q);
+      } else {
+        setDisplayPersons([]);
+        setAreaTotalBalance(0);
+        setSelectedPerson(null);
+      }
+    } else {
+      setConnectionSuggestions([]);
+    }
+  };
+
+  const onPersonSelect = async (person: any) => {
+    setConnectionQuery(String(person.connectionNumber));
+    setSelectedPerson(person);
+    setDisplayPersons([person]);
+    setAreaTotalBalance(calculateAreaTotalBalance([person]));
+    setConnectionSuggestions([]);
+    setReceiptNo("");
+    setCashReceived("");
+    setDescription("");
+    await loadTransactions(person._id);
+    setTimeout(() => cashReceivedRef.current?.focus(), 100);
+  };
+
+  const savePayment = async () => {
+    if (!db || !selectedPerson) {
+      alert("Please select a customer");
+      return;
+    }
+    if (!receiptNo.trim()) {
+      alert("Please enter Receipt Number");
+      return;
+    }
+    if (cashReceived === "" || Number(cashReceived) <= 0) {
+      alert("Please enter Cash Received amount");
+      return;
+    }
+
+    setSaving(true);
+    const now = new Date();
+    const todayDate = now.toISOString().slice(0, 10);
+    
+    try {
+      const paymentDoc = {
+        _id: `payment_${selectedPerson._id}_${Date.now()}`,
+        type: "payment",
+        areaId: selectedArea,
+        personId: selectedPerson._id,
+        connectionNumber: selectedPerson.connectionNumber,
+        personName: selectedPerson.name,
+        personAddress: selectedPerson.address,
+        receiptNo: receiptNo.trim(),
+        amount: Number(cashReceived),
+        description: description.trim() || "Cash received",
+        date: todayDate,
+        createdAt: now.toISOString(),
+      };
+      await db.localDB.put(paymentDoc);
+      
+      await loadTransactions(selectedPerson._id);
+      
+      const newBalance = await calculatePersonBalance(selectedPerson._id);
+      const updatedPerson = { ...selectedPerson, balance: newBalance };
+      setDisplayPersons([updatedPerson]);
+      setAreaTotalBalance(calculateAreaTotalBalance([updatedPerson]));
+      
+      setReceiptNo("");
+      setCashReceived("");
+      setDescription("");
+      
+      alert(`Payment saved successfully!\n\nCustomer: ${selectedPerson.name}\nReceipt Number: ${receiptNo}\nAmount: Rs. ${Number(cashReceived).toFixed(2)}`);
+      
+    } catch (e: any) {
+      alert("Failed to save: " + e.message);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const printReceipt = () => {
-    if (!lastSavedPayment) {
-      alert("No payment to print. Please save a payment first.");
+    if (!selectedPerson) {
+      alert("Please select a customer first");
+      return;
+    }
+    
+    setPrinting(true);
+    const printWindow = window.open("", "_blank", "width=800,height=600");
+    if (!printWindow) {
+      alert("Please allow pop-ups to print");
+      setPrinting(false);
       return;
     }
 
     const areaName = areas.find((a) => a._id === selectedArea)?.name || "";
-    const printWindow = window.open("", "_blank", "width=800,height=600");
-    if (!printWindow) {
-      alert("Please allow pop-ups to print receipt");
-      return;
-    }
-
+    const currentDate = new Date().toLocaleString();
+    const currentBalance = transactions[0]?.runningBalance || 0;
+    
     printWindow.document.write(`
       <!DOCTYPE html>
       <html>
       <head>
         <meta charset="UTF-8">
-        <title>Payment Receipt</title>
+        <title>Cash Receipt</title>
         <style>
           * { margin: 0; padding: 0; box-sizing: border-box; }
           body { font-family: Arial, sans-serif; padding: 20px; }
-          .receipt { max-width: 400px; margin: 0 auto; border: 2px solid #333; border-radius: 10px; padding: 20px; }
-          .header { text-align: center; border-bottom: 2px solid #333; padding-bottom: 15px; margin-bottom: 20px; }
+          .receipt { max-width: 500px; margin: 0 auto; border: 2px solid #000; border-radius: 10px; padding: 20px; }
+          .header { text-align: center; border-bottom: 2px solid #000; padding-bottom: 15px; margin-bottom: 20px; }
           .urdu { font-family: 'Noto Nastaliq Urdu', Arial; direction: rtl; font-size: 20px; font-weight: bold; }
-          .title { font-size: 18px; font-weight: bold; color: #555; }
-          .detail-row { display: flex; justify-content: space-between; margin-bottom: 10px; padding: 5px 0; border-bottom: 1px dashed #ddd; }
+          .title { font-size: 18px; font-weight: bold; margin-top: 5px; }
+          .detail-row { display: flex; justify-content: space-between; margin-bottom: 10px; padding: 5px 0; border-bottom: 1px dashed #ccc; }
           .label { font-weight: bold; }
-          .total { margin-top: 20px; padding-top: 15px; border-top: 2px solid #333; font-size: 18px; font-weight: bold; }
-          .balance { margin-top: 15px; padding: 10px; background: #f0f0f0; border-radius: 5px; text-align: center; }
-          .footer { text-align: center; margin-top: 30px; font-size: 11px; color: #888; }
+          .total { margin-top: 20px; padding-top: 15px; border-top: 2px solid #000; font-size: 18px; font-weight: bold; }
+          .balance { margin-top: 15px; padding: 10px; background: #f0f0f0; text-align: center; }
+          .footer { text-align: center; margin-top: 30px; font-size: 11px; color: #666; }
         </style>
       </head>
       <body>
@@ -165,170 +367,59 @@ export default function CashReceivedPage() {
             <div class="urdu">فیملی کیبل نیٹ ورک</div>
             <div class="title">CASH RECEIPT</div>
           </div>
-          <div class="detail-row"><span class="label">Receipt #:</span><span>${lastSavedPayment.receiptNo}</span></div>
-          <div class="detail-row"><span class="label">Date:</span><span>${new Date().toLocaleString()}</span></div>
-          <div class="detail-row"><span class="label">Connection #:</span><span>${selectedPerson?.connectionNumber}</span></div>
-          <div class="detail-row"><span class="label">Customer Name:</span><span>${selectedPerson?.name}</span></div>
-          <div class="detail-row"><span class="label">Area:</span><span>${areaName}</span></div>
-          <div class="detail-row"><span class="label">Address:</span><span>${selectedPerson?.address}</span></div>
-          <div class="detail-row"><span class="label">Paid Months:</span><span>${lastSavedPayment.paidMonths.join(", ")}</span></div>
-          ${lastSavedPayment.debitAmount > 0 ? `<div class="detail-row"><span class="label">Debit Payment:</span><span>Rs. ${lastSavedPayment.debitAmount.toFixed(2)}</span></div>` : ""}
-          <div class="total"><span class="label">Total Amount:</span><span>Rs. ${lastSavedPayment.totalAmount.toFixed(2)}</span></div>
-          <div class="balance"><span class="label">New Balance:</span><span>${lastSavedPayment.newBalance >= 0 ? `Rs. ${lastSavedPayment.newBalance.toFixed(2)}` : `-Rs. ${Math.abs(lastSavedPayment.newBalance).toFixed(2)}`}</span></div>
+          <div class="detail-row"><span class="label">Receipt No:</span><span>${receiptNo || "N/A"}</span></div>
+          <div class="detail-row"><span class="label">Date:</span><span>${currentDate}</span></div>
+          <div class="detail-row"><span class="label">Connection No:</span><span>${selectedPerson.connectionNumber}</span></div>
+          <div class="detail-row"><span class="label">Customer Name:</span><span>${selectedPerson.name}</span></div>
+          <div class="detail-row"><span class="label">Street:</span><span>${areaName}</span></div>
+          <div class="detail-row"><span class="label">Address:</span><span>${selectedPerson.address || "-"}</span></div>
+          ${description ? `<div class="detail-row"><span class="label">Description:</span><span>${description}</span></div>` : ""}
+          <div class="total"><span class="label">Amount Received:</span><span>Rs. ${Number(cashReceived).toFixed(2)}</span></div>
+          <div class="balance"><span class="label">Balance After Payment:</span><span>${currentBalance >= 0 ? `Rs. ${currentBalance.toFixed(2)}` : `-Rs. ${Math.abs(currentBalance).toFixed(2)}`}</span></div>
           <div class="footer">Thank you for your payment!</div>
         </div>
-        <script>window.onload=()=>{window.print();setTimeout(()=>window.close(),1000)}</script>
+        <script>window.onload=()=>{window.print();setTimeout(()=>window.close(),500)}</script>
       </body>
       </html>
     `);
     printWindow.document.close();
+    setPrinting(false);
   };
 
-  const savePayment = async () => {
-    if (!db || !selectedPersonId) {
-      alert("Please select a customer");
-      return;
+  const getTransactionType = (doc: any) => {
+    if (doc.type === "payment") return "Cash Received";
+    if (doc.type === "debit-payment") return "Debit Payment";
+    if (doc.type === "customer-debit") {
+      if (doc.isMonthlyFee) return "Monthly Fee";
+      return "Purchase";
     }
-    if (!receiptNo.trim()) {
-      alert("Please enter receipt number");
-      return;
-    }
-    if (amount === "" || Number(amount) <= 0) {
-      alert("Please enter a valid amount");
-      return;
-    }
-
-    setSaving(true);
-    let remainingAmount = Number(amount);
-    const paidMonths: string[] = [];
-    let debitPayment = 0;
-
-    try {
-      // Step 1: FIRST deduct pending monthly fees (oldest first)
-      for (const month of pendingMonths) {
-        if (remainingAmount >= month.amount) {
-          // Full month paid
-          const paymentDoc = {
-            _id: `payment_${selectedPersonId}_${month.month}_${Date.now()}`,
-            type: "payment",
-            areaId: selectedArea,
-            personId: selectedPersonId,
-            connectionNumber: connectionQuery,
-            personName: selectedPerson?.name,
-            personAddress: selectedPerson?.address,
-            receiptNo: receiptNo.trim(),
-            amount: month.amount,
-            description: `Monthly fee payment for ${month.monthName}`,
-            paymentMonth: month.month,
-            createdAt: new Date().toISOString(),
-          };
-          await db.localDB.put(paymentDoc);
-          paidMonths.push(month.monthName);
-          remainingAmount -= month.amount;
-        } else if (remainingAmount > 0) {
-          // Partial month payment
-          const paymentDoc = {
-            _id: `payment_${selectedPersonId}_${month.month}_${Date.now()}`,
-            type: "payment",
-            areaId: selectedArea,
-            personId: selectedPersonId,
-            connectionNumber: connectionQuery,
-            personName: selectedPerson?.name,
-            personAddress: selectedPerson?.address,
-            receiptNo: receiptNo.trim(),
-            amount: remainingAmount,
-            description: `Partial payment for ${month.monthName}`,
-            paymentMonth: month.month,
-            createdAt: new Date().toISOString(),
-          };
-          await db.localDB.put(paymentDoc);
-          paidMonths.push(`${month.monthName} (Partial)`);
-          remainingAmount = 0;
-          break;
-        } else {
-          break;
-        }
-      }
-
-      // Step 2: SECOND remaining amount goes to debit (udhar) balance
-      if (remainingAmount > 0) {
-        debitPayment = remainingAmount;
-        const debitPaymentDoc = {
-          _id: `debit_payment_${selectedPersonId}_${Date.now()}`,
-          type: "debit-payment",
-          areaId: selectedArea,
-          personId: selectedPersonId,
-          connectionNumber: connectionQuery,
-          personName: selectedPerson?.name,
-          personAddress: selectedPerson?.address,
-          receiptNo: receiptNo.trim(),
-          amount: remainingAmount,
-          description: description.trim() || "Payment towards outstanding debit balance",
-          createdAt: new Date().toISOString(),
-        };
-        await db.localDB.put(debitPaymentDoc);
-      }
-
-      // Step 3: Refresh balance from database (this ensures consistency)
-      await refreshCustomerData(selectedPersonId);
-
-      // Store saved payment details for printing
-      setLastSavedPayment({
-        receiptNo: receiptNo,
-        paidMonths: paidMonths,
-        debitAmount: debitPayment,
-        totalAmount: Number(amount),
-        newBalance: customerBalance + Number(amount), // Payment increases balance
-      });
-
-      // Generate next receipt number
-      const nextReceipt = await generateReceiptNo();
-      setReceiptNo(nextReceipt);
-      setAmount("");
-      setDescription("");
-      
-      const balanceStatus = customerBalance + Number(amount);
-      alert(`✅ Payment saved successfully!\n\n📌 Paid Months: ${paidMonths.join(", ")}\n💰 Debit Payment: Rs. ${debitPayment.toFixed(2)}\n📊 New Balance: ${balanceStatus >= 0 ? `Rs. ${balanceStatus.toFixed(2)}` : `-Rs. ${Math.abs(balanceStatus).toFixed(2)}`}`);
-      
-    } catch (e: any) {
-      console.error(e);
-      alert("Failed to save payment: " + e.message);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const formatBalance = (balance: number) => {
-    if (balance === 0) return "Rs. 0";
-    if (balance < 0) return `-Rs. ${Math.abs(balance).toFixed(2)}`;
-    return `Rs. ${balance.toFixed(2)}`;
+    if (doc.type === "credit-note") return "Concession";
+    return "-";
   };
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-screen bg-gray-50">
-        <div className="text-lg text-gray-600">Loading...</div>
+      <div className="flex items-center justify-center min-h-screen bg-white">
+        <div className="text-lg text-gray-500">Loading...</div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 p-6">
+    <div className="min-h-screen bg-white p-4">
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-black">Cash Received From Customer</h1>
-        <p className="text-sm text-gray-600">Positive balance = Customer has credit | Negative balance = Customer owes (Udhari)</p>
+        <h1 className="text-xl font-bold text-black">Cash Received From Customer</h1>
       </div>
 
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-        {/* Area Selection */}
-        <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 mb-2">Area</label>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+        <div>
+          <label className="block text-sm text-gray-700 mb-1">Street Name:</label>
           <select
             value={selectedArea}
             onChange={(e) => onAreaChange(e.target.value)}
-            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black"
+            className="w-full px-3 py-2 border border-gray-400 rounded bg-white text-black"
           >
-            <option value="">-- Select Area --</option>
+            <option value="">-- Select Street --</option>
             {areas.map((a) => (
               <option key={a._id} value={a._id}>
                 {a.name}
@@ -336,195 +427,181 @@ export default function CashReceivedPage() {
             ))}
           </select>
         </div>
+        <div className="relative">
+          <label className="block text-sm text-gray-700 mb-1">Connection No:</label>
+          <input
+            type="text"
+            value={connectionQuery}
+            onChange={(e) => onConnectionQueryChange(e.target.value)}
+            placeholder="Type connection number or name"
+            className="w-full px-3 py-2 border border-gray-400 rounded bg-white text-black"
+          />
+          {connectionSuggestions.length > 0 && (
+            <ul className="absolute z-10 left-0 right-0 mt-1 bg-white border border-gray-300 rounded shadow-lg max-h-48 overflow-auto">
+              {connectionSuggestions.map((p) => (
+                <li
+                  key={p._id}
+                  onClick={() => onPersonSelect(p)}
+                  className="px-3 py-2 hover:bg-gray-100 cursor-pointer border-b border-gray-100"
+                >
+                  <span className="font-medium">{p.connectionNumber}</span> - {p.name}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
 
-        {/* Connection Number */}
-        <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 mb-2">Connection Number / Name</label>
-          <div className="relative">
-            <input
-              type="text"
-              value={connectionQuery}
-              onChange={(e) => onConnectionQueryChange(e.target.value)}
-              placeholder={selectedArea ? "Type connection # or name..." : "Select area first"}
-              disabled={!selectedArea}
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black disabled:bg-gray-50"
-            />
-            {connectionSuggestions.length > 0 && (
-              <ul className="absolute z-10 left-0 right-0 mt-1 bg-white border border-gray-200 rounded max-h-60 overflow-auto shadow-lg">
-                {connectionSuggestions.map((p) => (
-                  <li
-                    key={p._id}
-                    onClick={() => onPersonSelect(p)}
-                    className="px-4 py-2 hover:bg-blue-50 cursor-pointer text-sm text-black border-b border-gray-100"
-                  >
-                    <div className="font-medium">Conn #{p.connectionNumber ?? "-"} — {p.name}</div>
-                    <div className="text-xs text-gray-400">{p.address || "-"}</div>
-                  </li>
-                ))}
-              </ul>
-            )}
+      {/* Area Summary Card */}
+      {selectedArea && displayPersons.length > 0 && !selectedPerson && (
+        <div className="mb-6 p-4 bg-gray-100 border border-gray-300 rounded">
+          <div className="flex justify-between items-center">
+            <div>
+              <span className="text-sm text-gray-600">Area Total Due:</span>
+              <span className="text-xl font-bold text-black ml-2">Rs. {areaTotalBalance.toFixed(2)}</span>
+            </div>
+            <div>
+              <span className="text-sm text-gray-600">Total Customers:</span>
+              <span className="text-xl font-bold text-black ml-2">{displayPersons.length}</span>
+            </div>
           </div>
         </div>
+      )}
 
-        {/* Customer Details */}
-        {selectedPerson && (
-          <>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6 p-4 bg-gray-50 rounded-lg">
+      {/* All Connections Table */}
+      {displayPersons.length > 0 && !selectedPerson && (
+        <div className="mb-6 border border-gray-300 rounded overflow-hidden">
+          <table className="w-full text-sm">
+            <thead className="bg-gray-100">
+              <tr>
+                <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 border-b border-gray-300">Connection No</th>
+                <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 border-b border-gray-300">Customer Name</th>
+                <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 border-b border-gray-300">Area</th>
+                <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 border-b border-gray-300">Receipt No</th>
+                <th className="px-3 py-2 text-right text-xs font-medium text-gray-700 border-b border-gray-300">Due Balance</th>
+              </tr>
+            </thead>
+            <tbody>
+              {displayPersons.map((person) => (
+                <tr 
+                  key={person._id} 
+                  className="border-b border-gray-200 cursor-pointer hover:bg-gray-50"
+                  onClick={() => onPersonSelect(person)}
+                >
+                  <td className="px-3 py-2 text-gray-700">{person.connectionNumber}</td>
+                  <td className="px-3 py-2 text-gray-800">{person.name}</td>
+                  <td className="px-3 py-2 text-gray-600">{getAreaName(person.areaId)}</td>
+                  <td className="px-3 py-2 text-gray-600 font-mono text-xs">{person.receiptNo || "-"}</td>
+                  <td className={`px-3 py-2 text-right font-mono ${person.balance < 0 ? "text-red-600" : person.balance > 0 ? "text-green-600" : "text-gray-600"}`}>
+                    {person.balance < 0 ? `- Rs. ${Math.abs(person.balance).toFixed(2)}` : 
+                     person.balance > 0 ? `Rs. ${person.balance.toFixed(2)}` : "0.00"}
+                   </td>
+                 </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Single Customer View */}
+      {selectedPerson && (
+        <>
+          <div className="mb-4 p-3 bg-gray-50 border border-gray-200 rounded">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
+              <div><span className="text-gray-500">Customer:</span> {selectedPerson.name}</div>
+              <div><span className="text-gray-500">Connection:</span> {selectedPerson.connectionNumber}</div>
+              <div><span className="text-gray-500">Area:</span> {getAreaName(selectedPerson.areaId)}</div>
+              <div><span className="text-gray-500">Receipt No:</span> {selectedPerson.receiptNo || "-"}</div>
+            </div>
+          </div>
+
+          <div className="mb-6 border border-gray-300 rounded overflow-hidden">
+            <div className="px-3 py-2 bg-gray-100 border-b border-gray-300 text-xs text-gray-500">
+              Showing newest transactions first ↓
+            </div>
+            <table className="w-full text-sm">
+              <thead className="bg-gray-100">
+                <tr>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 border-b border-gray-300">Date</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 border-b border-gray-300">Receipt No</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 border-b border-gray-300">Description</th>
+                  <th className="px-3 py-2 text-right text-xs font-medium text-gray-700 border-b border-gray-300">Amount</th>
+                  <th className="px-3 py-2 text-right text-xs font-medium text-gray-700 border-b border-gray-300">Balance</th>
+                </tr>
+              </thead>
+              <tbody>
+                {transactions.length === 0 ? (
+                  <tr><td colSpan={5} className="px-3 py-8 text-center text-gray-400">No transactions found</td></tr>
+                ) : (
+                  transactions.map((transaction, idx) => {
+                    const isBalanceNegative = transaction.runningBalance < 0;
+                    const isAmountNegative = transaction.amountChange < 0;
+                    return (
+                      <tr key={transaction._id || idx} className="border-b border-gray-200">
+                        <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{transaction.date}</td>
+                        <td className="px-3 py-2 text-gray-600 font-mono text-xs">{transaction.receiptNo}</td>
+                        <td className="px-3 py-2 text-gray-700">{getTransactionType(transaction)}: {transaction.description}</td>
+                        <td className={`px-3 py-2 text-right font-mono whitespace-nowrap ${isAmountNegative ? "text-red-600" : "text-green-600"}`}>
+                          {isAmountNegative ? `- Rs. ${Math.abs(transaction.amountChange).toFixed(2)}` : `+ Rs. ${transaction.amountChange.toFixed(2)}`}
+                        </td>
+                        <td className={`px-3 py-2 text-right font-mono whitespace-nowrap ${isBalanceNegative ? "text-red-600" : "text-green-600"}`}>
+                          {isBalanceNegative ? `- Rs. ${Math.abs(transaction.runningBalance).toFixed(2)}` : `Rs. ${transaction.runningBalance.toFixed(2)}`}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+              {transactions.length > 0 && (
+                <tfoot className="bg-gray-50 border-t border-gray-300">
+                  <tr>
+                    <td colSpan={4} className="px-3 py-2 text-right font-semibold text-gray-700">Current Balance:</td>
+                    <td className={`px-3 py-2 text-right font-bold ${transactions[0]?.runningBalance < 0 ? "text-red-600" : "text-green-600"}`}>
+                      {transactions[0]?.runningBalance < 0 
+                        ? `- Rs. ${Math.abs(transactions[0]?.runningBalance || 0).toFixed(2)}`
+                        : `Rs. ${(transactions[0]?.runningBalance || 0).toFixed(2)}`}
+                    </td>
+                  </tr>
+                </tfoot>
+              )}
+            </table>
+          </div>
+
+          {/* Payment Form */}
+          <div className="border-t border-gray-300 pt-6 mt-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
               <div>
-                <label className="block text-xs text-gray-500">Customer Name</label>
-                <div className="text-sm font-medium text-black">{selectedPerson.name}</div>
+                <label className="block text-sm text-gray-700 mb-1">Receipt No:</label>
+                <input type="text" value={receiptNo} onChange={(e) => setReceiptNo(e.target.value)} placeholder="Enter receipt number" className="w-full px-3 py-2 border border-gray-400 rounded bg-white text-black" />
               </div>
               <div>
-                <label className="block text-xs text-gray-500">Monthly Fee</label>
-                <div className="text-sm font-medium text-black">Rs.{Number(selectedPerson.amount || 0).toFixed(2)}</div>
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500">Current Balance</label>
-                <div className={`text-sm font-bold ${customerBalance < 0 ? "text-red-600" : customerBalance > 0 ? "text-green-600" : "text-gray-600"}`}>
-                  {formatBalance(customerBalance)}
-                </div>
-                {customerBalance < 0 && <p className="text-xs text-red-500 mt-1">⚠ Customer owes this amount</p>}
-                {customerBalance > 0 && <p className="text-xs text-green-500 mt-1">✓ Customer has credit</p>}
-                {customerBalance === 0 && <p className="text-xs text-gray-500 mt-1">✓ Balance is zero</p>}
+                <label className="block text-sm text-gray-700 mb-1">Description:</label>
+                <input type="text" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Enter description" className="w-full px-3 py-2 border border-gray-400 rounded bg-white text-black" />
               </div>
             </div>
-
-            {/* Pending Months - Shows which months are not paid */}
-            {pendingMonths.length > 0 && (
-              <div className="mb-6 p-4 bg-red-50 rounded-lg border border-red-200">
-                <h3 className="text-sm font-semibold text-red-800 mb-2">⚠ Pending Monthly Fees (Udhari)</h3>
-                <div className="space-y-1">
-                  {pendingMonths.map((month, idx) => (
-                    <div key={idx} className="flex justify-between text-sm">
-                      <span>{month.monthName}</span>
-                      <span className="font-medium text-red-600">Rs. {month.amount.toFixed(2)}</span>
-                    </div>
-                  ))}
-                </div>
-                <p className="text-xs text-red-600 mt-2">
-                  ⚠ Payment will FIRST clear these pending months, then remaining goes to debit balance
-                </p>
-              </div>
-            )}
-          </>
-        )}
-
-        {/* Receipt Number */}
-        <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 mb-2">Receipt Number</label>
-          <input
-            ref={receiptRef}
-            type="text"
-            value={receiptNo}
-            onChange={(e) => setReceiptNo(e.target.value)}
-            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black bg-blue-50"
-          />
-        </div>
-
-        {/* Amount */}
-        <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 mb-2">Amount Received (Rs.)</label>
-          <input
-            ref={amountRef}
-            type="number"
-            value={amount === "" ? "" : amount}
-            onChange={(e) => setAmount(e.target.value === "" ? "" : Number(e.target.value))}
-            placeholder="0.00"
-            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black"
-          />
-        </div>
-
-        {/* Description */}
-        <div className="mb-6">
-          <label className="block text-sm font-medium text-gray-700 mb-2">Description (Optional)</label>
-          <textarea
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            placeholder="Additional notes..."
-            rows={2}
-            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black resize-none"
-          />
-        </div>
-
-        {/* Payment Allocation Preview */}
-        {selectedPerson && amount !== "" && Number(amount) > 0 && (
-          <div className="mb-6 p-4 bg-blue-50 rounded-lg border border-blue-200">
-            <h3 className="text-sm font-semibold text-blue-800 mb-2">💰 Payment Allocation Preview</h3>
-            {(() => {
-              let remaining = Number(amount);
-              const allocation = [];
-              let tempBalance = customerBalance;
-              
-              for (const month of pendingMonths) {
-                if (remaining >= month.amount) {
-                  allocation.push({ month: month.monthName, amount: month.amount, type: "✅ Monthly Fee (Cleared)" });
-                  remaining -= month.amount;
-                  tempBalance += month.amount;
-                } else if (remaining > 0) {
-                  allocation.push({ month: month.monthName, amount: remaining, type: "⚠️ Monthly Fee (Partial)" });
-                  tempBalance += remaining;
-                  remaining = 0;
-                  break;
-                } else {
-                  break;
-                }
-              }
-              if (remaining > 0) {
-                allocation.push({ month: "Debit Balance (Udhar)", amount: remaining, type: "💰 Debit Payment" });
-                tempBalance += remaining;
-              }
-              
-              return (
-                <div className="space-y-2">
-                  {allocation.map((item, idx) => (
-                    <div key={idx} className="flex justify-between text-sm">
-                      <span>{item.month}</span>
-                      <span className="font-medium">Rs. {item.amount.toFixed(2)}</span>
-                    </div>
-                  ))}
-                  <div className="mt-3 pt-2 border-t border-blue-200">
-                    <div className="flex justify-between text-sm font-bold">
-                      <span>Current Balance:</span>
-                      <span className={customerBalance < 0 ? "text-red-600" : "text-green-600"}>
-                        {formatBalance(customerBalance)}
-                      </span>
-                    </div>
-                    <div className="flex justify-between text-sm font-bold">
-                      <span>After Payment:</span>
-                      <span className={tempBalance < 0 ? "text-red-600" : "text-green-600"}>
-                        {formatBalance(tempBalance)}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              );
-            })()}
+            <div className="mb-4">
+              <label className="block text-sm text-gray-700 mb-1">Cash Received:</label>
+              <input ref={cashReceivedRef} type="number" value={cashReceived === "" ? "" : cashReceived} onChange={(e) => setCashReceived(e.target.value === "" ? "" : Number(e.target.value))} placeholder="0.00" className="w-48 px-3 py-2 border border-gray-400 rounded bg-white text-black" />
+            </div>
+            <div className="flex gap-3 mt-4">
+              <button onClick={savePayment} disabled={saving} className="px-6 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50">{saving ? "Saving..." : "Save Payment"}</button>
+              <button onClick={printReceipt} disabled={printing || !selectedPerson} className="px-6 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50">{printing ? "Printing..." : "Print Receipt"}</button>
+              <button onClick={() => { setSelectedPerson(null); setConnectionQuery(""); setReceiptNo(""); setCashReceived(""); setDescription(""); setTransactions([]); if (selectedArea) loadAreaPersons(selectedArea); }} className="px-6 py-2 bg-gray-400 text-white rounded hover:bg-gray-500">Clear</button>
+            </div>
           </div>
-        )}
+        </>
+      )}
 
-        {/* Buttons */}
-        <div className="flex gap-3">
-          <button
-            onClick={savePayment}
-            disabled={!selectedPersonId || saving}
-            className="flex-1 px-6 py-3 bg-gradient-to-r from-blue-600 to-purple-700 text-white rounded-lg hover:from-blue-700 hover:to-purple-800 transition-all font-semibold disabled:opacity-50"
-          >
-            {saving ? "Saving..." : "💾 Save Payment"}
-          </button>
-          <button
-            onClick={printReceipt}
-            disabled={!lastSavedPayment}
-            className="px-6 py-3 bg-gradient-to-r from-green-600 to-teal-700 text-white rounded-lg hover:from-green-700 hover:to-teal-800 transition-all font-semibold disabled:opacity-50"
-          >
-            🖨️ Print Receipt
-          </button>
+      {/* Footer */}
+      <div className="mt-6 pt-4 border-t border-gray-300">
+        <div className="flex justify-between items-center mb-2">
+          <span className="text-sm text-gray-500">Cash Received:</span>
+          <span className="text-lg font-bold text-black">{cashReceived !== "" ? `Rs. ${Number(cashReceived).toFixed(2)}` : "0.00"}</span>
         </div>
-        
-        {lastSavedPayment && (
-          <p className="text-xs text-green-600 mt-3 text-center">
-            ✓ Last payment saved. Click Print Receipt to reprint.
-          </p>
-        )}
+        <div className="flex justify-between text-xs text-gray-400">
+          <span>F1 - Date</span>
+          <span>F12 Back</span>
+        </div>
       </div>
     </div>
   );

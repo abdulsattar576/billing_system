@@ -1,4 +1,5 @@
-// src/app/services/db.ts
+import { checkNewConnectionDeduction } from "@/lib/cron-setup";
+
 export const initDB = async () => {
   if (typeof window === "undefined") return null; // only run in browser
 
@@ -82,68 +83,105 @@ export const initDB = async () => {
   // ---------------------------
   // PERSON CRUD
   // ---------------------------
-  const createPerson = async (
-    name: string,
-    areaId: string,
-    connectionNumber?: string,
-    amount?: number,          // monthly fee
-    address?: string,
-    amountPaid: number = 0,   // kept for compatibility, defaults to 0
-    remainingBalance?: number,
-    receiptNo?: string,
-    phoneNumber?: string      // new field
-  ) => {
-    if (!name.trim() || !areaId) throw new Error("Invalid input");
+const createPerson = async (
+  name: string,
+  areaId: string,
+  connectionNumber?: string,
+  amount?: number,
+  address?: string,
+  amountPaid: number = 0,
+  remainingBalance?: number,
+  receiptNo?: string,
+  phoneNumber?: string
+) => {
+  if (!name.trim() || !areaId) throw new Error("Invalid input");
 
-    const conn = connectionNumber !== undefined ? String(connectionNumber).trim() : "";
-    if (!conn) throw new Error("Connection number is required for a person");
+  const conn = connectionNumber !== undefined ? String(connectionNumber).trim() : "";
+  if (!conn) throw new Error("Connection number is required for a person");
 
-    const receipt = receiptNo !== undefined ? String(receiptNo).trim() : "";
-    if (!receipt) throw new Error("Receipt number is required for a person");
+  const receipt = receiptNo !== undefined ? String(receiptNo).trim() : "";
+  if (!receipt) throw new Error("Receipt number is required for a person");
 
-    // ✅ FIX: Check uniqueness ONLY within the same area (not globally)
-    const allDocs = await localDB.allDocs({ include_docs: true });
-    const duplicateInArea = allDocs.rows
-      .map((row: any) => row.doc)
-      .find(
-        (doc: any) =>
-          doc &&
-          !doc._deleted &&
-          doc.type === "person" &&
-          doc.areaId === areaId &&                    // same area only
-          doc.connectionNumber === conn &&
-          doc.status !== "disconnected" &&
-          doc.status !== "defaulter"
-      );
+  // Check uniqueness ONLY within the same area
+  const allDocs = await localDB.allDocs({ include_docs: true });
+  const duplicateInArea = allDocs.rows
+    .map((row: any) => row.doc)
+    .find(
+      (doc: any) =>
+        doc &&
+        !doc._deleted &&
+        doc.type === "person" &&
+        doc.areaId === areaId &&
+        doc.connectionNumber === conn &&
+        doc.status !== "disconnected" &&
+        doc.status !== "defaulter"
+    );
 
-    if (duplicateInArea) {
-      throw new Error(
-        `Connection number ${conn} is already assigned to "${duplicateInArea.name}" in this area`
-      );
-    }
+  if (duplicateInArea) {
+    throw new Error(
+      `Connection number ${conn} is already assigned to "${duplicateInArea.name}" in this area`
+    );
+  }
 
-    const monthlyFeeNum = Number(amount || 0);
-    const paidNum = Number(amountPaid || 0);
-    const calculatedRemaining = monthlyFeeNum - paidNum;
-
-    const doc: any = {
-      _id: `person_${areaId}_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
-      type: "person",
-      name: name.trim(),
-      areaId,
-      connectionNumber: conn,
-      receiptNo: receipt,
-      amount: monthlyFeeNum,
-      address: address?.trim() || "-",
-      amountPaid: paidNum,
-      remainingBalance: Number(remainingBalance ?? calculatedRemaining),
-      phoneNumber: phoneNumber?.trim() || "",
-      status: "active",
-      createdAt: new Date().toISOString(),
-    };
-
-    return localDB.put(doc);
+  const monthlyFeeNum = Number(amount || 0);
+  const paidNum = Number(amountPaid || 0);
+  
+  const doc: any = {
+    _id: `person_${areaId}_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+    type: "person",
+    name: name.trim(),
+    areaId,
+    connectionNumber: conn,
+    receiptNo: receipt,
+    amount: monthlyFeeNum,
+    address: address?.trim() || "-",
+    amountPaid: paidNum,
+    remainingBalance: Math.abs(monthlyFeeNum),
+    phoneNumber: phoneNumber?.trim() || "",
+    status: "active",
+    createdAt: new Date().toISOString(),
   };
+
+  // Save the person first
+  const result = await localDB.put(doc);
+  
+  // Create initial debit record for the current month's fee
+  const now = new Date();
+  const currentMonth = now.toISOString().slice(0, 7);
+  const currentMonthName = now.toLocaleString("default", { month: "long", year: "numeric" });
+  
+  // If no existing deduction, create one for current month
+  if (monthlyFeeNum > 0) {
+    await localDB.put({
+      _id: `monthly_fee_${result.id}_${currentMonth}_${Date.now()}`,
+      type: "customer-debit",
+      areaId: areaId,
+      personId: result.id,
+      connectionNumber: conn,
+      personName: name.trim(),
+      personAddress: address?.trim() || "-",
+      receiptNo: receipt,
+      date: now.toISOString().slice(0, 10),
+      amount: monthlyFeeNum,
+      description: `${currentMonthName} - Monthly Fee (Initial)`,
+      isMonthlyFee: true,
+      month: currentMonth,
+      createdAt: now.toISOString(),
+    });
+  }
+  
+  // Dynamically import and call the cron check (avoids circular dependency)
+  setTimeout(async () => {
+    try {
+      const { checkNewConnectionDeduction } = await import("@/lib/cron-setup");
+      await checkNewConnectionDeduction(result.id);
+    } catch (err) {
+      console.error("Failed to trigger new connection deduction:", err);
+    }
+  }, 1000);
+  
+  return result;
+};
 
   const getPersonsByArea = async (areaId: string) => {
     const res = await localDB.allDocs({ include_docs: true });
@@ -238,40 +276,41 @@ export const initDB = async () => {
           doc && !doc._deleted && doc.type === "person" && doc.status === "disconnected"
       );
   };
-// fee_list
-const createFeeList = async (description: string, amount: number) => {
-  const doc = {
-    _id: `fee_${Date.now()}`,
-    type: "feeList",
-    description,
-    amount: Number(amount),
-    createdAt: new Date().toISOString(),
+
+  // fee_list
+  const createFeeList = async (description: string, amount: number) => {
+    const doc = {
+      _id: `fee_${Date.now()}`,
+      type: "feeList",
+      description,
+      amount: Number(amount),
+      createdAt: new Date().toISOString(),
+    };
+    return localDB.put(doc);
   };
 
-  return localDB.put(doc);
-};
-//get_feeList
-const getFeeList = async () => {
-  const res = await localDB.find({
-    selector: { type: "feeList" },
-  });
+  // get_feeList
+  const getFeeList = async () => {
+    const res = await localDB.find({
+      selector: { type: "feeList" },
+    });
+    return res.docs;
+  };
 
-  return res.docs;
-};
-// update fee list
-const updateFeeList = async (fee: any, updates: any) => {
-  if (!fee._id || !fee._rev) throw new Error("_id and _rev required");
+  // update fee list
+  const updateFeeList = async (fee: any, updates: any) => {
+    if (!fee._id || !fee._rev) throw new Error("_id and _rev required");
+    return localDB.put({
+      ...fee,
+      ...updates,
+      updatedAt: new Date().toISOString(),
+    });
+  };
 
-  return localDB.put({
-    ...fee,
-    ...updates,
-    updatedAt: new Date().toISOString(),
-  });
-};
-// delete fee list
-const deleteFeeList = async (fee: any) => {
-  return localDB.remove(fee);
-};
+  // delete fee list
+  const deleteFeeList = async (fee: any) => {
+    return localDB.remove(fee);
+  };
 
   const deletePerson = async (person: any) => {
     try {
@@ -300,15 +339,20 @@ const deleteFeeList = async (fee: any) => {
   // ---------------------------
   // AGGREGATION HELPERS
   // ---------------------------
-  const getAllPersons = async () => {
-    const res = await localDB.allDocs({ include_docs: true });
-    return res.rows
-      .map((row: any) => row.doc)
-      .filter(
-        (doc: any) =>
-          doc && !doc._deleted && doc.type === "person" && doc.status === "active"
-      );
-  };
+// src/app/services/db.ts
+
+const getAllPersons = async () => {
+  const res = await localDB.allDocs({ include_docs: true });
+  return res.rows
+    .map((row: any) => row.doc)
+    .filter(
+      (doc: any) =>
+        doc && 
+        !doc._deleted && 
+        doc.type === "person" && 
+        (doc.status === "active" || doc.status === "defaulter")  // Include defaulters too
+    );
+};
 
   const getAllDefaulters = async () => {
     const res = await localDB.allDocs({ include_docs: true });
@@ -507,15 +551,15 @@ const deleteFeeList = async (fee: any) => {
     const res = await localDB.find({ selector: { type: "user" } });
     return res.docs;
   };
-// Add to db.ts - Unified balance calculation
-const calculateCustomerBalance = async (personId: string) => {
+
+  // Balance calculation
+ const calculateCustomerBalance = async (personId: string) => {
   try {
     const res = await localDB.allDocs({ include_docs: true });
     const docs = res.rows
       .map((r: any) => r.doc)
       .filter((d: any) => d && !d._deleted && d.personId === personId);
 
-    // Get person details
     const person = docs.find((d: any) => d.type === "person");
     if (!person) return 0;
 
@@ -523,9 +567,22 @@ const calculateCustomerBalance = async (personId: string) => {
     const connectionDate = new Date(person.createdAt);
     const currentDate = new Date();
     
-    // Calculate expected monthly fees from connection date to current month
     let expectedTotalFees = 0;
-    let feeDate = new Date(connectionDate.getFullYear(), connectionDate.getMonth() + 1, 1);
+    
+    // FIX: Start fee calculation from the connection date's month
+    // If connection date is after 15th, start from next month
+    // If connection date is on/before 15th, start from current month
+    const connectionDay = connectionDate.getDate();
+    let feeDate;
+    
+    if (connectionDay > 15) {
+      // Start from next month
+      feeDate = new Date(connectionDate.getFullYear(), connectionDate.getMonth() + 1, 1);
+    } else {
+      // Start from current month
+      feeDate = new Date(connectionDate.getFullYear(), connectionDate.getMonth(), 1);
+    }
+    
     const today = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
     
     // Get paid months
@@ -544,7 +601,7 @@ const calculateCustomerBalance = async (personId: string) => {
       feeDate.setMonth(feeDate.getMonth() + 1);
     }
 
-    // Calculate all transactions
+    // Also include any existing debit records (like the initial one we created)
     const totalPurchases = docs
       .filter((d: any) => d.type === "customer-debit")
       .reduce((sum: number, d: any) => sum + Number(d.amount || 0), 0);
@@ -561,7 +618,6 @@ const calculateCustomerBalance = async (personId: string) => {
       .filter((d: any) => d.type === "debit-payment")
       .reduce((sum: number, d: any) => sum + Number(d.amount || 0), 0);
 
-    // Balance Formula: (Payments + Concessions) - (Fees + Purchases)
     const totalCredit = totalPayments + totalDebitPayments + totalConcessions;
     const totalDebit = expectedTotalFees + totalPurchases;
     const balance = totalCredit - totalDebit;
@@ -573,55 +629,50 @@ const calculateCustomerBalance = async (personId: string) => {
   }
 };
 
-const getPendingMonths = async (personId: string) => {
-  try {
-    const res = await localDB.allDocs({ include_docs: true });
-    const docs = res.rows
-      .map((r: any) => r.doc)
-      .filter((d: any) => d && !d._deleted && d.personId === personId);
+  const getPendingMonths = async (personId: string) => {
+    try {
+      const res = await localDB.allDocs({ include_docs: true });
+      const docs = res.rows
+        .map((r: any) => r.doc)
+        .filter((d: any) => d && !d._deleted && d.personId === personId);
 
-    const person = docs.find((d: any) => d.type === "person");
-    if (!person) return [];
+      const person = docs.find((d: any) => d.type === "person");
+      if (!person) return [];
 
-    const monthlyFee = Number(person.amount || 0);
-    const connectionDate = new Date(person.createdAt);
-    const currentDate = new Date();
-    
-    const paidMonthsSet = new Set();
-    docs
-      .filter((d: any) => d.type === "payment")
-      .forEach((p: any) => {
-        if (p.paymentMonth) paidMonthsSet.add(p.paymentMonth);
-      });
-    
-    const pending = [];
-    let feeDate = new Date(connectionDate.getFullYear(), connectionDate.getMonth() + 1, 1);
-    const today = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
-    
-    while (feeDate <= today) {
-      const monthStr = feeDate.toISOString().slice(0, 7);
-      if (!paidMonthsSet.has(monthStr)) {
-        pending.push({
-          month: monthStr,
-          monthName: feeDate.toLocaleString('default', { month: 'long', year: 'numeric' }),
-          amount: monthlyFee,
+      const monthlyFee = Number(person.amount || 0);
+      const connectionDate = new Date(person.createdAt);
+      const currentDate = new Date();
+      
+      const paidMonthsSet = new Set();
+      docs
+        .filter((d: any) => d.type === "payment")
+        .forEach((p: any) => {
+          if (p.paymentMonth) paidMonthsSet.add(p.paymentMonth);
         });
+      
+      const pending = [];
+      let feeDate = new Date(connectionDate.getFullYear(), connectionDate.getMonth() + 1, 1);
+      const today = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
+      
+      while (feeDate <= today) {
+        const monthStr = feeDate.toISOString().slice(0, 7);
+        if (!paidMonthsSet.has(monthStr)) {
+          pending.push({
+            month: monthStr,
+            monthName: feeDate.toLocaleString('default', { month: 'long', year: 'numeric' }),
+            amount: monthlyFee,
+          });
+        }
+        feeDate.setMonth(feeDate.getMonth() + 1);
       }
-      feeDate.setMonth(feeDate.getMonth() + 1);
+      
+      return pending;
+    } catch (e) {
+      console.error("Failed to get pending months", e);
+      return [];
     }
-    
-    return pending;
-  } catch (e) {
-    console.error("Failed to get pending months", e);
-    return [];
-  }
-};
+  };
 
-// Add to return statement at the end of db.ts
- 
-  // ... existing returns ...
-  
- 
   return {
     localDB,
     remoteDB,
@@ -654,10 +705,10 @@ const getPendingMonths = async (personId: string) => {
     getUser,
     getAllUsers,
     createFeeList,
-getFeeList,
-updateFeeList,
-deleteFeeList,
-calculateCustomerBalance,
-  getPendingMonths,
+    getFeeList,
+    updateFeeList,
+    deleteFeeList,
+    calculateCustomerBalance,
+    getPendingMonths,
   };
 };
