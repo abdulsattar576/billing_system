@@ -1,3 +1,4 @@
+//mian/helpers/create-window.js
 const { screen, BrowserWindow } = require("electron");
 const Store = require("electron-store");
 

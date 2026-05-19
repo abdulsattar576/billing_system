@@ -1,3 +1,4 @@
+//main/background.js
 const path = require("path");
 const { app, ipcMain } = require("electron");
 const serve = require("electron-serve");

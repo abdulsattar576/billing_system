@@ -1,3 +1,4 @@
+//main/halpers/index.js
 const { screen, BrowserWindow } = require("electron");
 const Store = require("electron-store");
 

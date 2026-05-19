@@ -10,17 +10,21 @@ async function waitForDB(): Promise<boolean> {
     try {
       const db = await initDB();
       if (db && db.localDB) {
-        // Test if DB is actually working
-        await db.localDB.info();
+        // Test if DB is actually working with a timeout
+        const infoPromise = db.localDB.info();
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('DB info timeout')), 5000)
+        );
+        await Promise.race([infoPromise, timeoutPromise]);
         console.log('[Cron] Database is ready');
         isDBReady = true;
         return true;
       }
-    } catch (err) {
-      console.log(`[Cron] Waiting for DB... attempt ${retryCount + 1}/${MAX_RETRIES}`);
+    } catch (err: any) {
+      console.log(`[Cron] Waiting for DB... attempt ${retryCount + 1}/${MAX_RETRIES} - ${err?.message || 'unknown error'}`);
     }
     retryCount++;
-    await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
+    await new Promise(resolve => setTimeout(resolve, 3000));
   }
   return false;
 }
@@ -33,13 +37,15 @@ export function setupMonthlyFeeCron() {
 
   const checkAndDeduct = async () => {
     try {
+      // Reset retry count on each check
+      retryCount = 0;
+      isDBReady = false;
+      
       // Wait for DB to be ready
-      if (!isDBReady) {
-        const ready = await waitForDB();
-        if (!ready) {
-          console.error('[Cron] Database not ready after retries, skipping');
-          return;
-        }
+      const ready = await waitForDB();
+      if (!ready) {
+        console.error('[Cron] Database not ready after retries, skipping this check');
+        return;
       }
 
       console.log('[Cron] Checking monthly fee deduction...');
@@ -70,11 +76,16 @@ export function setupMonthlyFeeCron() {
     }
   };
 
-  // Run after longer delay to ensure app is fully loaded
-  setTimeout(checkAndDeduct, 10000);
+  // Run after longer delay (15 seconds)
+  const initialTimeout = setTimeout(checkAndDeduct, 15000);
   
+  // Check once per day
   const interval = setInterval(checkAndDeduct, 24 * 60 * 60 * 1000);
-  return () => clearInterval(interval);
+  
+  return () => {
+    clearTimeout(initialTimeout);
+    clearInterval(interval);
+  };
 }
 
 async function runMonthlyDeduction() {
@@ -84,10 +95,19 @@ async function runMonthlyDeduction() {
       return { success: false, error: "Database not initialized" };
     }
 
-    // Test if DB is responsive
-    await db.localDB.info();
+    // Test if DB is responsive with timeout
+    let allPersons;
+    try {
+      const personsPromise = db.getAllPersons();
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('getAllPersons timeout')), 10000)
+      );
+      allPersons = await Promise.race([personsPromise, timeoutPromise]);
+    } catch (err) {
+      console.error('Failed to get persons:', err);
+      return { success: false, error: "Failed to fetch persons" };
+    }
 
-    const allPersons = await db.getAllPersons();
     const now = new Date();
     const currentMonth = now.toISOString().slice(0, 7);
     const currentMonthName = now.toLocaleString("default", { month: "long", year: "numeric" });
@@ -111,8 +131,20 @@ async function runMonthlyDeduction() {
           continue;
         }
 
-        // Check if already deducted this month
-        const allDocs = await db.localDB.allDocs({ include_docs: true });
+        // Check if already deducted this month with timeout
+        let allDocs;
+        try {
+          const docsPromise = db.localDB.allDocs({ include_docs: true });
+          const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('allDocs timeout')), 5000)
+          );
+          allDocs = await Promise.race([docsPromise, timeoutPromise]);
+        } catch (err) {
+          console.error(`Failed to fetch docs for ${person.name}:`, err);
+          results.errors++;
+          continue;
+        }
+
         const alreadyDeducted = allDocs.rows
           .map((r: any) => r.doc)
           .some(
@@ -130,34 +162,29 @@ async function runMonthlyDeduction() {
           continue;
         }
 
-        // Deduct the monthly fee (NO BALANCE CHECK)
-        await db.localDB.put({
-          _id: `monthly_fee_${person._id}_${currentMonth}_${Date.now()}`,
-          type: "customer-debit",
-          areaId: person.areaId,
-          personId: person._id,
-          connectionNumber: person.connectionNumber,
-          personName: person.name,
-          personAddress: person.address,
-          receiptNo: person.receiptNo,
-          date: todayDate,
-          amount: monthlyFee,
-          description: `${currentMonthName} - Monthly Fee`,
-          isMonthlyFee: true,
-          month: currentMonth,
-          createdAt: now.toISOString(),
-        });
-        
-        // Also update the person's currentBalance field
-        const personDoc = await db.localDB.get(person._id);
-        const newBalance = (personDoc.currentBalance || 0) - monthlyFee;
-        await db.localDB.put({
-          ...personDoc,
-          currentBalance: newBalance,
-          lastUpdated: now.toISOString(),
-        });
-        
-        results.deducted++;
+        // Deduct the monthly fee
+        try {
+          await db.localDB.put({
+            _id: `monthly_fee_${person._id}_${currentMonth}_${Date.now()}`,
+            type: "customer-debit",
+            areaId: person.areaId,
+            personId: person._id,
+            connectionNumber: person.connectionNumber,
+            personName: person.name,
+            personAddress: person.address,
+            receiptNo: person.receiptNo,
+            date: todayDate,
+            amount: monthlyFee,
+            description: `${currentMonthName} - Monthly Fee`,
+            isMonthlyFee: true,
+            month: currentMonth,
+            createdAt: now.toISOString(),
+          });
+          results.deducted++;
+        } catch (err) {
+          console.error(`Failed to save deduction for ${person.name}:`, err);
+          results.errors++;
+        }
         
       } catch (err: any) {
         results.errors++;
@@ -181,9 +208,9 @@ export async function manualTriggerMonthlyDeduction() {
   const result = await runMonthlyDeduction();
   
   if (result.success) {
-    alert(`Monthly fee deduction completed!\n\nDeducted: ${result.deducted}\nSkipped: ${result.skipped}\nErrors: ${result.errors}`);
+    alert(`Monthly fee deduction completed!\n\n✅ Deducted: ${result.deducted}\n⏭️ Skipped: ${result.skipped}\n❌ Errors: ${result.errors}`);
   } else {
-    alert('Failed: ' + result.error);
+    alert('❌ Failed: ' + result.error);
   }
   return result;
 }
@@ -239,15 +266,6 @@ export async function checkNewConnectionDeduction(personId: string) {
         month: currentMonth,
         createdAt: now.toISOString(),
       });
-      
-      // Update person's currentBalance
-      const newBalance = (person.currentBalance || 0) - monthlyFee;
-      await db.localDB.put({
-        ...person,
-        currentBalance: newBalance,
-        lastUpdated: now.toISOString(),
-      });
-      
       console.log(`[Cron] Deducted initial fee for ${person.name}`);
       return { success: true, deducted: true };
     }
@@ -263,5 +281,5 @@ export function resetMonthlyCheck() {
   if (typeof window === 'undefined') return;
   localStorage.removeItem('last_monthly_fee_check');
   console.log('[Cron] Reset monthly check.');
-  alert('Monthly fee check reset. Reload the app to run deduction again.');
+  alert('✅ Monthly fee check reset. Reload the app to run deduction again.');
 }
