@@ -109,7 +109,13 @@ export default function LoginPage() {
   };
   const saveServerConfig = async () => {
     try {
-      const testUrl = `${serverUrl}/_up`;
+      const cleanUrl = serverUrl
+        .replace("http://", "")
+        .replace("https://", "")
+        .replace(":5984", "")
+        .trim();
+
+      const testUrl = `http://${cleanUrl}:5984/_up`;
 
       const res = await fetch(testUrl);
 
@@ -117,7 +123,7 @@ export default function LoginPage() {
         throw new Error("Server not reachable");
       }
 
-      localStorage.setItem("server_url", serverUrl);
+      localStorage.setItem("server_url", cleanUrl);
       localStorage.setItem("server_db", serverDB);
       localStorage.setItem("server_user", serverUser);
       localStorage.setItem("server_pass", serverPass);
@@ -126,7 +132,6 @@ export default function LoginPage() {
 
       window.location.reload();
     } catch (err) {
-       
       alert("Cannot connect to server. Please check the IP.");
     }
   };

@@ -21,6 +21,7 @@ export default function PersonRecordsPage() {
   const [allRecords, setAllRecords] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
+  const areaRef = useRef<HTMLInputElement>(null);
   const connectionRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -36,19 +37,16 @@ export default function PersonRecordsPage() {
     setup();
   }, []);
 
-  const onAreaChange = async (areaId: string) => {
-    setSelectedArea(areaId);
-    const selectedAreaObj = areas.find((a) => a._id === areaId);
-    setAreaQuery(selectedAreaObj?.name || "");
+  const onAreaSelect = async (area: any) => {
+    setAreaQuery(area.name);
+    setAreaSuggestions([]);
+    setSelectedArea(area._id);
     setSelectedPerson(null);
     setConnectionQuery("");
     setConnectionSuggestions([]);
     setAllRecords([]);
-    setFromMonth("");
-    setToMonth("");
-
-    if (!db || !areaId) return;
-    const persons = await db.getPersonsByArea(areaId);
+    if (!db) return;
+    const persons = await db.getPersonsByArea(area._id);
     setPersonsInArea(persons || []);
   };
 
@@ -185,26 +183,60 @@ export default function PersonRecordsPage() {
           Select Person
         </h2>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-          {/* Area - DROPDOWN */}
+          {/* Area */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
               Area
             </label>
-            <select
-              value={selectedArea}
-              onChange={(e) => onAreaChange(e.target.value)}
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-800 bg-white"
-            >
-              <option value="">-- Select Area --</option>
-              {areas.map((area) => (
-                <option key={area._id} value={area._id}>
-                  {area.name}
-                </option>
-              ))}
-            </select>
+            <div className="relative">
+              <input
+                ref={areaRef}
+                type="text"
+                value={areaQuery}
+                onChange={(e) => {
+                  const q = e.target.value;
+                  setAreaQuery(q);
+                  if (!q) {
+                    setAreaSuggestions([]);
+                    return;
+                  }
+                  setAreaSuggestions(
+                    areas
+                      .filter((a) =>
+                        a.name.toLowerCase().includes(q.toLowerCase()),
+                      )
+                      .slice(0, 20),
+                  );
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && areaSuggestions.length > 0) {
+                    onAreaSelect(areaSuggestions[0]);
+                    setTimeout(() => connectionRef.current?.focus(), 100);
+                  }
+                }}
+                placeholder="Type area name..."
+                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-800 placeholder-gray-400"
+              />
+              {areaSuggestions.length > 0 && (
+                <ul className="absolute z-10 left-0 right-0 mt-1 bg-white border border-gray-200 rounded-lg max-h-44 overflow-auto shadow-lg">
+                  {areaSuggestions.map((a) => (
+                    <li
+                      key={a._id}
+                      onClick={() => {
+                        onAreaSelect(a);
+                        setTimeout(() => connectionRef.current?.focus(), 100);
+                      }}
+                      className="px-4 py-2 hover:bg-blue-50 cursor-pointer text-sm text-gray-800"
+                    >
+                      {a.name}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           </div>
 
-          {/* Person - Search Input */}
+          {/* Person */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
               Connection # / Name
@@ -535,6 +567,7 @@ export default function PersonRecordsPage() {
                     </tr>
                   ))}
                 </tbody>
+                {/* Totals row */}
                 <tfoot className="bg-gray-50 border-t-2 border-gray-300">
                   <tr>
                     <td
