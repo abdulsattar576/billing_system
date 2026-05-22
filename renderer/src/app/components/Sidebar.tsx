@@ -40,7 +40,7 @@ const menuItems = [
     icon: faFileInvoiceDollar,
     href: "/debitadd",
   },
-
+{name:"Customer Records",icon:faHistory,href:"/CustomerLedgerPage"},
   { name: "Person Records", icon: faHistory, href: "/person-records" },
   { name: "Disconnection List", icon: faBan, href: "/disconnection-list" },
   // { name: "Defaulter Lists", icon: faExclamationTriangle, href: "/defaulter-lists" },

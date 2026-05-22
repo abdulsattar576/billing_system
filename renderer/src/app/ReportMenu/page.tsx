@@ -9,7 +9,8 @@ export default function ReportMenuPage() {
   const [areaQuery, setAreaQuery] = useState("");
   const [areaSuggestions, setAreaSuggestions] = useState<any[]>([]);
   const [selectedArea, setSelectedArea] = useState("");
-
+ 
+  const [selectedMonthInput, setSelectedMonthInput] = useState("");
   const [personsInArea, setPersonsInArea] = useState<any[]>([]);
   const [connectionQuery, setConnectionQuery] = useState("");
   const [connectionSuggestions, setConnectionSuggestions] = useState<any[]>([]);
@@ -24,15 +25,48 @@ export default function ReportMenuPage() {
   const [records, setRecords] = useState<any[]>([]);
   const [displayRows, setDisplayRows] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+const handleMonthInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  let value = e.target.value.replace(/[^\d-]/g, "");
 
+  if (/^\d{6}$/.test(value)) {
+    value = `${value.slice(0, 4)}-${value.slice(4, 6)}`;
+  }
+
+  setSelectedMonthInput(value);
+
+  if (value === "") {
+    setSelectedMonth("");
+    return;
+  }
+
+  if (isValidMonth(value)) {
+    setSelectedMonth(value);
+  }
+};
   // Helpers
-  const getMonthString = (date: Date) => date.toISOString().slice(0, 7);
-  const getPreviousMonth = (month: string) => {
-    const [year, mon] = month.split("-").map(Number);
-    const prevDate = new Date(year, mon - 1, 1);
-    prevDate.setMonth(prevDate.getMonth() - 1);
-    return getMonthString(prevDate);
-  };
+const isValidMonth = (month: string) => /^\d{4}-\d{2}$/.test(month);
+
+const getMonthString = (dateInput: any) => {
+  const date = dateInput instanceof Date ? dateInput : new Date(dateInput);
+
+  if (Number.isNaN(date.getTime())) {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  }
+
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+};
+
+const getPreviousMonth = (month: string) => {
+  if (!isValidMonth(month)) {
+    month = getMonthString(new Date());
+  }
+
+  const [year, mon] = month.split("-").map(Number);
+  const prevDate = new Date(year, mon - 2, 1);
+
+  return getMonthString(prevDate);
+};
   const calculateMonthsBetween = (start: string, end: string) => {
     const [startYear, startMonth] = start.split("-").map(Number);
     const [endYear, endMonth] = end.split("-").map(Number);
@@ -129,9 +163,7 @@ export default function ReportMenuPage() {
         prevMonth = getPreviousMonth(currentMonthStr);
       }
 
-      const startMonth = getMonthString(
-        new Date(person.createdAt || new Date()),
-      );
+    const startMonth = getMonthString(person.createdAt || new Date());
       const monthsUpToPrev = calculateMonthsBetween(startMonth, prevMonth);
       const totalExpectedUpToPrev = monthlyFee * monthsUpToPrev;
 
@@ -417,12 +449,12 @@ export default function ReportMenuPage() {
             <label className="block text-sm font-medium text-gray-700 mb-2">
               Filter by Month (optional)
             </label>
-            <input
-              type="month"
-              value={selectedMonth}
-              onChange={(e) => setSelectedMonth(e.target.value)}
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-black"
-            />
+             <input
+        type="text"
+        value={selectedMonthInput}
+        onChange={handleMonthInputChange}
+        placeholder="YYYY-MM"
+      />
           </div>
         </div>
       </div>
