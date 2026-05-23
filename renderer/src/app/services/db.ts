@@ -1,5 +1,4 @@
-import { checkNewConnectionDeduction } from "@/lib/cron-setup";
-
+ 
 export const initDB = async () => {
   if (typeof window === "undefined") return null; // only run in browser
 
@@ -729,7 +728,7 @@ const createCashReceivedRecord = async (data: any) => {
   // Update person's balance
   const updatePersonBalance = async (personId: string, amountChange: number) => {
     try {
-      const person = await localDB.get(personId);
+      const person: any = await localDB.get(personId);
       const newBalance = (person.currentBalance || 0) + amountChange;
       const updatedPerson = {
         ...person,
@@ -746,7 +745,7 @@ const createCashReceivedRecord = async (data: any) => {
 
   const getPersonBalance = async (personId: string) => {
     try {
-      const person = await localDB.get(personId);
+      const person: any = await localDB.get(personId);
       return person.currentBalance || 0;
     } catch (err) {
       return 0;

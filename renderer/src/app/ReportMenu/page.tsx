@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { initDB } from "../services/db";
 
 export default function ReportMenuPage() {
@@ -9,8 +9,7 @@ export default function ReportMenuPage() {
   const [areaQuery, setAreaQuery] = useState("");
   const [areaSuggestions, setAreaSuggestions] = useState<any[]>([]);
   const [selectedArea, setSelectedArea] = useState("");
- 
-  const [selectedMonthInput, setSelectedMonthInput] = useState("");
+
   const [personsInArea, setPersonsInArea] = useState<any[]>([]);
   const [connectionQuery, setConnectionQuery] = useState("");
   const [connectionSuggestions, setConnectionSuggestions] = useState<any[]>([]);
@@ -18,56 +17,75 @@ export default function ReportMenuPage() {
   const [selectedPersonName, setSelectedPersonName] = useState("");
   const [selectedPersonAddress, setSelectedPersonAddress] = useState("");
   const [selectedPersonFee, setSelectedPersonFee] = useState<number | "">("");
-  const [selectedPersonCreatedAt, setSelectedPersonCreatedAt] = useState<
-    string | null
-  >(null);
+  const [selectedPersonCreatedAt, setSelectedPersonCreatedAt] = useState<string | null>(null);
   const [selectedMonth, setSelectedMonth] = useState("");
   const [records, setRecords] = useState<any[]>([]);
   const [displayRows, setDisplayRows] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-const handleMonthInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-  let value = e.target.value.replace(/[^\d-]/g, "");
 
-  if (/^\d{6}$/.test(value)) {
-    value = `${value.slice(0, 4)}-${value.slice(4, 6)}`;
-  }
+  const onAreaQueryChange = (value: string) => {
+    setAreaQuery(value);
 
-  setSelectedMonthInput(value);
+    if (!value.trim()) {
+      setAreaSuggestions([]);
+      setSelectedArea("");
+      return;
+    }
 
-  if (value === "") {
-    setSelectedMonth("");
-    return;
-  }
+    const q = value.toLowerCase();
 
-  if (isValidMonth(value)) {
-    setSelectedMonth(value);
-  }
-};
+    const filtered = areas.filter((area) =>
+      String(area.name || "").toLowerCase().includes(q),
+    );
+
+    setAreaSuggestions(filtered.slice(0, 10));
+  };
+
+  const onAreaSelect = async (area: any) => {
+    setAreaQuery(area.name);
+    setAreaSuggestions([]);
+    await onAreaChange(area._id);
+  };
+
   // Helpers
-const isValidMonth = (month: string) => /^\d{4}-\d{2}$/.test(month);
+  const getMonthString = (dateInput?: any) => {
+    const date = dateInput ? new Date(dateInput) : new Date();
 
-const getMonthString = (dateInput: any) => {
-  const date = dateInput instanceof Date ? dateInput : new Date(dateInput);
+    if (Number.isNaN(date.getTime())) {
+      const now = new Date();
+      return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    }
 
-  if (Number.isNaN(date.getTime())) {
-    const now = new Date();
-    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-  }
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+  };
 
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
-};
+  const normalizeMonthInput = (value: string) => {
+    let v = value.replace(/[^\d-]/g, "");
 
-const getPreviousMonth = (month: string) => {
-  if (!isValidMonth(month)) {
-    month = getMonthString(new Date());
-  }
+    if (/^\d{6}$/.test(v)) {
+      v = `${v.slice(0, 4)}-${v.slice(4, 6)}`;
+    }
 
-  const [year, mon] = month.split("-").map(Number);
-  const prevDate = new Date(year, mon - 2, 1);
+    return v;
+  };
 
-  return getMonthString(prevDate);
-};
+  const isValidMonth = (month: string) => /^[0-9]{4}-[0-9]{2}$/.test(month || "");
+
+  const getPreviousMonth = (month: string) => {
+    if (!isValidMonth(month)) {
+      month = getMonthString(new Date());
+    }
+
+    const [year, mon] = month.split("-").map(Number);
+    const prevDate = new Date(year, mon - 1, 1);
+    prevDate.setMonth(prevDate.getMonth() - 1);
+    return getMonthString(prevDate);
+  };
+
   const calculateMonthsBetween = (start: string, end: string) => {
+    if (!isValidMonth(start) || !isValidMonth(end)) return 0;
+    if (end < start) return 0;
+
     const [startYear, startMonth] = start.split("-").map(Number);
     const [endYear, endMonth] = end.split("-").map(Number);
     return (endYear - startYear) * 12 + (endMonth - startMonth) + 1;
@@ -95,11 +113,14 @@ const getPreviousMonth = (month: string) => {
     setSelectedPersonName("");
     setSelectedPersonAddress("");
     setSelectedPersonFee("");
+    setSelectedPersonCreatedAt(null);
     setRecords([]);
     setConnectionQuery("");
     setConnectionSuggestions([]);
     setSelectedMonth("");
+
     if (!db || !areaId) return;
+
     try {
       const p = await db.getPersonsByArea(areaId);
       setPersonsInArea(p || []);
@@ -112,59 +133,100 @@ const getPreviousMonth = (month: string) => {
   const onPersonSelect = (personId: string) => {
     setSelectedPersonId(personId);
     const person = personsInArea.find((x) => x._id === personId);
+
     if (person) {
       setSelectedPersonName(person?.name || "");
       setSelectedPersonAddress(person?.address || "");
       setSelectedPersonFee(person?.amount || "");
       setSelectedPersonCreatedAt(person?.createdAt ?? null);
-      setConnectionQuery(
-        person
-          ? String(
-              person.connectionNumber ?? person.number ?? person.name ?? "",
-            )
-          : "",
-      );
+      setConnectionQuery(String(person.connectionNumber ?? person.number ?? person.name ?? ""));
       setConnectionSuggestions([]);
+
+      // Auto-fill current month, but user can manually edit it
+      setSelectedMonth(getMonthString(new Date()));
     }
+  };
+
+  const clearPersonSelection = () => {
+    setSelectedPersonId("");
+    setSelectedPersonName("");
+    setSelectedPersonAddress("");
+    setSelectedPersonFee("");
+    setSelectedPersonCreatedAt(null);
+    setConnectionQuery("");
+    setConnectionSuggestions([]);
   };
 
   const loadRecords = async (areaId: string) => {
     if (!db) return;
+
     try {
-      await db.localDB.createIndex({ index: { fields: ["type", "areaId"] } });
-      const res = await db.localDB.find({
-        selector: { type: "debit", areaId },
-      });
-      setRecords(res.docs || []);
+      const res = await db.localDB.allDocs({ include_docs: true });
+
+      const docs = res.rows
+        .map((row: any) => row.doc)
+        .filter(
+          (doc: any) =>
+            doc &&
+            !doc._deleted &&
+            doc.areaId === areaId &&
+            ["debit", "payment", "cash-received", "cashReceived"].includes(doc.type),
+        );
+
+      setRecords(docs || []);
     } catch (e) {
       console.warn("failed to load records", e);
     }
   };
 
-  // Compute display rows (all persons, with pending logic)
+  // Compute display rows (all persons or selected single person, with pending logic)
   useEffect(() => {
     if (!selectedArea || personsInArea.length === 0) {
       setDisplayRows([]);
       return;
     }
 
-    const rows = personsInArea.map((person) => {
+    const personsToShow = selectedPersonId
+      ? personsInArea.filter((person) => person._id === selectedPersonId)
+      : personsInArea;
+
+    const rows = personsToShow.map((person) => {
       const monthlyFee = Number(person.amount || 0);
-      const personRecords = records.filter(
-        (r: any) => r.personId === person._id,
-      );
+      const personRecords = records.filter((r: any) => r.personId === person._id);
 
-      let prevMonth;
-      if (selectedMonth) {
-        prevMonth = getPreviousMonth(selectedMonth);
-      } else {
-        const today = new Date();
-        const currentMonthStr = getMonthString(today);
-        prevMonth = getPreviousMonth(currentMonthStr);
-      }
+     const currentMonthStr = getMonthString(new Date());
 
-    const startMonth = getMonthString(person.createdAt || new Date());
-      const monthsUpToPrev = calculateMonthsBetween(startMonth, prevMonth);
+let prevMonth;
+if (selectedMonth) {
+  // For backward selection, calculate from selected month up to current month
+  prevMonth = getPreviousMonth(currentMonthStr);
+} else {
+  prevMonth = getPreviousMonth(currentMonthStr);
+}
+
+      const registeredMonth = getMonthString(new Date(person.createdAt || new Date()));
+
+      // Use case 1:
+      // If customer was created in 2026-05, but operator enters 2025-05,
+      // deduction must start from 2025-05 instead of the registration month.
+      let deductionStartMonth = registeredMonth;
+
+// If operator selects an older month,
+// use that month as starting point
+if (
+  selectedMonth &&
+  selectedMonth < registeredMonth
+) {
+  deductionStartMonth = selectedMonth;
+}
+
+// Always calculate up to CURRENT month
+const calculationEndMonth = getMonthString(new Date());
+
+const monthsUpToPrev = calculateMonthsBetween(
+  deductionStartMonth,
+  calculationEndMonth
+);
       const totalExpectedUpToPrev = monthlyFee * monthsUpToPrev;
 
       const paidUpToPrev = personRecords
@@ -174,10 +236,7 @@ const getPreviousMonth = (month: string) => {
         })
         .reduce((sum: number, r: any) => sum + Number(r.amount || 0), 0);
 
-      const previousRemaining = Math.max(
-        0,
-        totalExpectedUpToPrev - paidUpToPrev,
-      );
+      const previousRemaining = Math.max(0, totalExpectedUpToPrev - paidUpToPrev);
 
       let paidThisMonth = 0;
       let pendingThisMonth = previousRemaining;
@@ -188,8 +247,16 @@ const getPreviousMonth = (month: string) => {
           .filter((r: any) => r.month === selectedMonth)
           .reduce((sum: number, r: any) => sum + Number(r.amount || 0), 0);
 
-        const expectedThisMonth = monthlyFee + previousRemaining;
-        pendingThisMonth = Math.max(0, expectedThisMonth - paidThisMonth);
+const monthsFromSelectedToCurrent =
+  selectedMonth
+    ? calculateMonthsBetween(selectedMonth, currentMonthStr)
+    : 1;
+
+const expectedThisMonth =
+  selectedMonth && selectedMonth < registeredMonth
+    ? monthlyFee * monthsFromSelectedToCurrent
+    : previousRemaining + monthlyFee;      
+   pendingThisMonth = Math.max(0, expectedThisMonth - paidThisMonth);
         monthDisplayed = selectedMonth;
       }
 
@@ -208,9 +275,9 @@ const getPreviousMonth = (month: string) => {
     });
 
     setDisplayRows(rows);
-  }, [selectedArea, selectedMonth, personsInArea, records]);
+  }, [selectedArea, selectedMonth, selectedPersonId, personsInArea, records]);
 
-  // Print function - prints the visible monthly view (all persons)
+  // Print function - prints the visible monthly view
   const printRecords = () => {
     const printWindow = window.open("", "", "width=1200,height=600");
     if (!printWindow) return;
@@ -297,63 +364,30 @@ const getPreviousMonth = (month: string) => {
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-black">Report Menu</h1>
-        <p className="text-sm text-gray-600">
-          View balances and payment history (read-only)
-        </p>
+        <p className="text-sm text-gray-600">View balances and payment history (read-only)</p>
       </div>
 
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
         <div className="grid grid-cols-1 md:grid-cols-5 gap-4 items-end">
-          <div className="md:col-span-1">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Area
-            </label>
-            <div className="relative">
-              <input
-                type="text"
-                value={areaQuery}
-                onChange={(e) => {
-                  const q = String(e.target.value || "");
-                  setAreaQuery(q);
-                  if (!q) {
-                    setAreaSuggestions([]);
-                    return;
-                  }
-                  const qLower = q.toLowerCase();
-                  const filtered = areas.filter((ar) =>
-                    String(ar.name || "")
-                      .toLowerCase()
-                      .startsWith(qLower),
-                  );
-                  setAreaSuggestions(filtered.slice(0, 20));
-                }}
-                placeholder="Type area name (optional)"
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-black"
-              />
-              {areaSuggestions.length > 0 && (
-                <ul className="absolute z-10 left-0 right-0 mt-1 bg-white border border-gray-200 rounded max-h-44 overflow-auto shadow-lg">
-                  {areaSuggestions.map((a) => (
-                    <li
-                      key={a._id}
-                      onClick={() => {
-                        setAreaQuery(a.name || "");
-                        setAreaSuggestions([]);
-                        onAreaChange(a._id);
-                      }}
-                      className="px-4 py-2 hover:bg-blue-50 cursor-pointer text-sm text-black"
-                    >
-                      {a.name}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Area</label>
+
+            <select
+              value={selectedArea}
+              onChange={(e) => onAreaChange(e.target.value)}
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-black bg-white"
+            >
+              <option value="">-- Select Area --</option>
+              {areas.map((area) => (
+                <option key={area._id} value={area._id}>
+                  {area.name}
+                </option>
+              ))}
+            </select>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Connection / Name
-            </label>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Connection / Name</label>
             <div className="relative">
               <input
                 type="text"
@@ -361,22 +395,32 @@ const getPreviousMonth = (month: string) => {
                 onChange={(e) => {
                   const q = String(e.target.value || "");
                   setConnectionQuery(q);
-                  if (!q) {
+
+                  if (!q.trim()) {
                     setConnectionSuggestions([]);
+                    setSelectedPersonId("");
+                    setSelectedPersonName("");
+                    setSelectedPersonAddress("");
+                    setSelectedPersonFee("");
+                    setSelectedPersonCreatedAt(null);
                     return;
                   }
-                  const qLower = q.toLowerCase();
+
+                  const qLower = q.toLowerCase().trim();
+
+                  // Use case 2:
+                  // Single person selection should work by connection number.
                   const filtered = personsInArea.filter((p) => {
-                    const conn = String(
-                      p.connectionNumber ?? p.number ?? p.name ?? "",
-                    );
+                    const conn = String(p.connectionNumber ?? p.number ?? "").toLowerCase();
+                    const name = String(p.name ?? "").toLowerCase();
+
                     return (
-                      conn.toLowerCase().startsWith(qLower) ||
-                      String(p.name || "")
-                        .toLowerCase()
-                        .startsWith(qLower)
+                      conn.startsWith(qLower) ||
+                      conn.includes(qLower) ||
+                      name.includes(qLower)
                     );
                   });
+
                   setConnectionSuggestions(filtered.slice(0, 20));
                 }}
                 placeholder="Type connection # or name"
@@ -386,8 +430,7 @@ const getPreviousMonth = (month: string) => {
               {connectionSuggestions.length > 0 && (
                 <ul className="absolute z-10 left-0 right-0 mt-1 bg-white border border-gray-200 rounded max-h-44 overflow-auto shadow-lg">
                   {connectionSuggestions.map((p) => {
-                    const label =
-                      p.connectionNumber ?? p.number ?? p.name ?? "";
+                    const label = `${p.connectionNumber ?? p.number ?? "-"} - ${p.name ?? ""}`;
                     return (
                       <li
                         key={p._id}
@@ -404,9 +447,7 @@ const getPreviousMonth = (month: string) => {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Person Name
-            </label>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Person Name</label>
             <input
               type="text"
               value={selectedPersonName}
@@ -416,9 +457,7 @@ const getPreviousMonth = (month: string) => {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Address
-            </label>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Address</label>
             <input
               type="text"
               value={selectedPersonAddress}
@@ -428,34 +467,38 @@ const getPreviousMonth = (month: string) => {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Monthly Fee
-            </label>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Monthly Fee</label>
             <input
               type="text"
-              value={
-                selectedPersonFee === ""
-                  ? ""
-                  : `Rs.${Number(selectedPersonFee).toFixed(2)}`
-              }
+              value={selectedPersonFee === "" ? "" : `Rs.${Number(selectedPersonFee).toFixed(2)}`}
               readOnly
               className="w-full px-4 py-3 border border-gray-300 rounded-lg bg-gray-50 text-black"
             />
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-1 gap-4 mt-4 items-end">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Filter by Month (optional)
-            </label>
-             <input
-        type="text"
-        value={selectedMonthInput}
-        onChange={handleMonthInputChange}
-        placeholder="YYYY-MM"
-      />
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-4 mt-4 items-end">
+          <div className="md:col-span-1">
+            <label className="block text-sm font-medium text-gray-700 mb-2">Filter by Month (optional)</label>
+            <input
+              type="text"
+              value={selectedMonth}
+              onChange={(e) => setSelectedMonth(normalizeMonthInput(e.target.value))}
+              placeholder="YYYY-MM"
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-black"
+            />
           </div>
+
+          {selectedPersonId && (
+            <div className="md:col-span-1">
+              <button
+                onClick={clearPersonSelection}
+                className="w-full px-4 py-3 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition"
+              >
+                Show All Persons
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -466,12 +509,7 @@ const getPreviousMonth = (month: string) => {
             Monthly Report
             {selectedMonth && (
               <span className="text-sm font-normal text-gray-500 ml-2">
-                (for{" "}
-                {new Date(selectedMonth + "-01").toLocaleString("default", {
-                  month: "long",
-                  year: "numeric",
-                })}
-                )
+                (for {new Date(selectedMonth + "-01").toLocaleString("default", { month: "long", year: "numeric" })})
               </span>
             )}
           </h2>
@@ -487,55 +525,31 @@ const getPreviousMonth = (month: string) => {
         </div>
 
         {displayRows.length === 0 ? (
-          <div className="text-sm text-gray-500">
-            Select an area to view records
-          </div>
+          <div className="text-sm text-gray-500">Select an area to view records</div>
         ) : (
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                    Person
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                    Connection #
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                    Address
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                    Monthly Fee
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                    Month
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                    Amount Received
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                    Pending / Balance Due
-                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Person</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Connection #</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Address</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Monthly Fee</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Month</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Amount Received</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Pending / Balance Due</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
                 {displayRows.map((row: any) => (
                   <tr key={row._id} className="hover:bg-gray-50">
-                    <td className="px-6 py-3 text-sm text-gray-900">
-                      {row.personName}
-                    </td>
-                    <td className="px-6 py-3 text-sm text-gray-900">
-                      {row.connectionNumber || "-"}
-                    </td>
-                    <td className="px-6 py-3 text-sm text-gray-500">
-                      {row.personAddress || "-"}
-                    </td>
+                    <td className="px-6 py-3 text-sm text-gray-900">{row.personName}</td>
+                    <td className="px-6 py-3 text-sm text-gray-900">{row.connectionNumber || "-"}</td>
+                    <td className="px-6 py-3 text-sm text-gray-500">{row.personAddress || "-"}</td>
                     <td className="px-6 py-3 text-sm text-gray-500">
                       Rs.{Number(row.personMonthlyFee).toFixed(2)}
                     </td>
-                    <td className="px-6 py-3 text-sm text-gray-500">
-                      {row.month}
-                    </td>
+                    <td className="px-6 py-3 text-sm text-gray-500">{row.month}</td>
                     <td className="px-6 py-3 text-sm text-gray-900 font-medium">
                       Rs.{Number(row.amount).toFixed(2)}
                     </td>
